@@ -26,5 +26,9 @@
 
 - 正式实验继续强制信号次日执行、数据指纹、边界检查和报告前验证。
 
+### Fixed
+
+- 锁定兼容 Python 3.11–3.13 的 NumPy 版本，并让 CI 在依赖安装失败时立即中止。
+
 [Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/Zhaolong666520/a-share-quant-lab/releases/tag/v0.7.0
