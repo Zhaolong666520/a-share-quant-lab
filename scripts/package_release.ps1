@@ -1,6 +1,6 @@
 param(
-    [ValidatePattern("^v[0-9]+$")]
-    [string]$Version = "v7"
+    [ValidatePattern("^v[0-9]+(?:\.[0-9]+){0,2}$")]
+    [string]$Version = "v0.7.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +13,7 @@ $StageLeaf = "package_staging_$Version"
 $VerifyLeaf = "package_verify_$Version"
 $StagePath = Join-Path $ProjectRoot $StageLeaf
 $VerifyPath = Join-Path $ProjectRoot $VerifyLeaf
-$ArchivePath = Join-Path $DeliverablesRoot "finance-lab-source-$Version.zip"
+$ArchivePath = Join-Path $DeliverablesRoot "a-share-quant-lab-source-$Version.zip"
 $ProjectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $ProjectPython)) {
     throw "Run scripts\setup.ps1 before packaging"
@@ -55,9 +55,13 @@ function Remove-SafeTemporaryDirectory {
 $RootFiles = @(
     ".gitignore",
     "AGENTS.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
     "pyproject.toml",
     "requirements-lock.txt",
     "README.md",
+    "SECURITY.md",
     "run_account.cmd",
     "run_cost_stress.cmd",
     "run_data_health.cmd",
@@ -69,7 +73,7 @@ $RootFiles = @(
     "update_data.cmd",
     "verify.cmd"
 )
-$SourceDirectories = @("config", "docs", "experiments", "research", "scripts", "src", "tests")
+$SourceDirectories = @(".github", "config", "docs", "experiments", "research", "scripts", "src", "tests")
 $FourthLessonName = ([char]0x7B2C).ToString() + ([char]0x56DB).ToString() + ([char]0x8BFE).ToString() + ".md"
 $FifthLessonName = ([char]0x7B2C).ToString() + ([char]0x4E94).ToString() + ([char]0x8BFE).ToString() + ".md"
 $SixthLessonName = ([char]0x7B2C).ToString() + ([char]0x516D).ToString() + ([char]0x8BFE).ToString() + ".md"
@@ -83,6 +87,14 @@ $RequiredArchivePaths = @(
     "experiments\005_execution_feasibility.md",
     "experiments\006_data_and_account_ledger.md",
     "requirements-lock.txt",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    ".github\workflows\ci.yml",
+    "docs\assets\social-preview.jpg",
+    "docs\assets\account-equity.png",
+    "docs\releases\v0.7.0.md",
     "src\finance_lab\cost_sensitivity.py",
     "src\finance_lab\parameter_sensitivity.py",
     "src\finance_lab\parameter_sensitivity_report.py",
@@ -144,6 +156,7 @@ try {
         Where-Object { $_.Extension -eq ".pyc" } |
         Remove-Item -Force
 
+    $FileCount = (Get-ChildItem -LiteralPath $StagePath -File -Recurse -Force).Count
     Compress-Archive -Path (Join-Path $StagePath "*") -DestinationPath $ArchivePath -CompressionLevel Optimal -Force
 
     New-Item -ItemType Directory -Path $VerifyPath | Out-Null
@@ -176,7 +189,6 @@ try {
         Pop-Location
     }
 
-    $FileCount = (Get-ChildItem -LiteralPath $VerifyPath -File -Recurse -Force).Count
     $Hash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
     Write-Host "Source release archive verified: $ArchivePath" -ForegroundColor Green
     Write-Host "Files: $FileCount"

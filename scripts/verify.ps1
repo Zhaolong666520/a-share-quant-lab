@@ -8,7 +8,19 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 Set-Location $ProjectRoot
 & $Python -m ruff check .
+if ($LASTEXITCODE -ne 0) {
+    throw "Ruff failed"
+}
 & $Python -m mypy src
+if ($LASTEXITCODE -ne 0) {
+    throw "mypy failed"
+}
 & $Python -m pytest
-& $Python -m compileall -q src
+if ($LASTEXITCODE -ne 0) {
+    throw "pytest failed"
+}
+& $Python -m compileall -q src tests
+if ($LASTEXITCODE -ne 0) {
+    throw "compileall failed"
+}
 Write-Host "All local verification checks passed." -ForegroundColor Green

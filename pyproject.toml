@@ -7,7 +7,27 @@ name = "finance-lab"
 version = "0.7.0"
 description = "面向初学者的 A 股日线数据与可复现回测实验室"
 readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "Zhaolong666520", email = "1465024680@qq.com" },
+]
 requires-python = ">=3.11,<3.14"
+keywords = [
+  "a-share",
+  "backtesting",
+  "financial-data",
+  "quantitative-finance",
+  "walk-forward-analysis",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial",
+]
 dependencies = [
   "akshare>=1.17,<2",
   "baostock>=0.8.9,<1",
@@ -27,6 +47,12 @@ dev = [
 
 [project.scripts]
 finance-lab = "finance_lab.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Zhaolong666520/a-share-quant-lab"
+Repository = "https://github.com/Zhaolong666520/a-share-quant-lab"
+Issues = "https://github.com/Zhaolong666520/a-share-quant-lab/issues"
+Changelog = "https://github.com/Zhaolong666520/a-share-quant-lab/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

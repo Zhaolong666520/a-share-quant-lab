@@ -123,7 +123,7 @@ def create_demo_report(root: Path | None = None) -> tuple[Path, dict[str, float 
     html_path, _, _ = write_backtest_report(
         result,
         paths,
-        title="Finance Lab 离线演示报告（合成数据）",
+        title="A-Share Quant Lab 离线演示报告（合成数据）",
     )
     return html_path, result.metrics.to_dict()
 

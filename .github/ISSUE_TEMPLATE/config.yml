@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私密安全报告
+    url: https://github.com/Zhaolong666520/a-share-quant-lab/security/advisories/new
+    about: 请在此私下报告可能泄露凭证、执行代码或破坏数据的问题。

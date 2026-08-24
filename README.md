@@ -1,209 +1,103 @@
-# Finance Lab：A股数据与回测入门项目
+# A-Share Quant Lab｜A股量化研究实验室
 
-这是一个已经替你搭好骨架的学习项目。它能完成：
+[![CI](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/version-0.7.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
+[![License](https://img.shields.io/github/license/Zhaolong666520/a-share-quant-lab)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Zhaolong666520/a-share-quant-lab?style=social)](https://github.com/Zhaolong666520/a-share-quant-lab/stargazers)
 
-- 使用 AKShare 获取A股指数和ETF日线；
-- 使用 BaoStock 作为第二来源进行抽样核对；
-- 保存不可变的原始快照、整理后的 Parquet 和 DuckDB 数据库；
-- 检查重复日期、价格关系、空值和异常间隔；
-- 运行买入持有及双均线基础回测；
-- 强制信号次日执行并扣除成本；
-- 生成中文 HTML 报告、净值图和 JSON 指标；
-- 将固定参数放进多个互不重叠窗口，生成滚动稳定性报告；
-- 使用多组假设单边成本，生成交易成本压力报告；
-- 在固定成本和窗口下比较九组均线，生成参数稳健性热力图；
-- 比较理想开盘成交、统一延迟与事后日线阻塞代理，生成执行可行性压力报告；
-- 为每个整理数据文件生成SHA-256、数据集ID、来源、日期区间与陈旧状态；
-- 对可交易ETF运行现金、整手份额、最低佣金、卖出税费和滑点账户账本；
-- 在断网时使用明确标记的合成数据演示完整流程。
+![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 
-> 本项目仅用于学习，不连接券商、不自动交易、不构成投资建议。
+一个面向初学者的、**可复现且可审计**的 A 股量化研究实验室。它不负责告诉你“明天买什么”，而是帮助你把数据来源、实验参数、交易成本、执行限制和现金账本逐项对清楚。
 
-## 第一次使用
+> Reproducible and auditable A-share research in Python: data health, walk-forward analysis, cost stress, execution constraints, and a cash/lot/fee ledger.
 
-项目已经包含独立环境时，直接双击：
+如果这个项目帮你避开了一个回测陷阱，欢迎点一下 **Star**；它会让我知道哪些方向值得继续完善。
 
-```text
-run_demo.cmd
-```
+## 为什么值得收藏
 
-运行完成后，打开：
+- **拒绝未来函数**：信号至少延迟到下一交易日执行，并用逐行检查守住边界。
+- **数据有身份证**：每份正式数据都有 SHA-256、数据集 ID、来源、采集时间、复权方式和陈旧状态。
+- **不只看一条漂亮曲线**：固定参数后依次做样本外、滚动窗口、成本、参数和执行可行性压力测试。
+- **按真实账户约束记账**：现金、100 份整手、最低佣金、卖出税费和滑点逐日对账。
+- **亏损结果也保留**：项目明确禁止删除落后基准的实验，也不把合成数据冒充真实行情。
+- **Windows 友好**：常用流程都提供可双击的 `.cmd`，同时保留完整 Python CLI。
+
+## 它解决什么问题
+
+很多回测“看起来能赚钱”，只是因为它无意中偷看了未来、忽略了成本，或只展示最漂亮的一组参数。这个项目把研究流程拆成一条可以检查的证据链：
 
 ```text
-outputs\demo_000300_sma_report.html
+原始快照 → 数据校验/指纹 → 固定实验 → 样本外检验
+         → 成本/参数/执行压力 → 现金账本 → HTML/JSON/CSV 报告
 ```
 
-这份报告使用合成数据，只用于学习指标和确认程序正常。
+| 能力 | 项目如何处理 |
+| --- | --- |
+| 数据接入 | AKShare 获取 A 股指数与 ETF 日线；BaoStock 用于抽样核对 |
+| 数据存储 | 不可变原始快照、规范 Parquet、DuckDB |
+| 数据健康 | 重复日期、OHLC 关系、空值、异常间隔、陈旧状态、来源失败 |
+| 基础回测 | 买入持有与双均线；信号次日执行并扣除成本 |
+| 稳健性 | 固定切分、walk-forward、成本压力、参数热力图 |
+| 执行压力 | 额外延迟与事后日线阻塞代理；受阻订单保留原仓位 |
+| 账户账本 | 现金、整手、最低佣金、卖出费用、滑点和逐日对账 |
+| 研究产物 | 中文 HTML、净值图、逐笔 CSV、机器可读 JSON |
 
-## 下载真实数据
+## 一个诚实的结果示例
 
-双击：
+![实验 006 的账户净值示例](docs/assets/account-equity.png)
 
-```text
-update_data.cmd
+实验 006 中，固定的 20/60 双均线在所用数据与费用假设下得到 **-12.84%**，同期买入持有为 **+14.43%**。这张图不是策略推荐，而是在说明：本项目会保留不漂亮的结果，并要求现金、份额、费用与权益全部对账通过。完整假设见 [`experiments/006_data_and_account_ledger.md`](experiments/006_data_and_account_ledger.md)。
+
+## 3 分钟开始
+
+### 方式一：Windows 双击运行
+
+1. 安装 Python 3.11、3.12 或 3.13。
+2. 双击 `run_demo.cmd`。首次运行会创建 `.venv` 并安装依赖。
+3. 打开 `outputs\demo_000300_sma_report.html`。
+
+离线演示使用明确标记的合成数据，不需要行情网络，只用于理解指标和确认环境正常。
+
+### 方式二：PowerShell / CLI
+
+```powershell
+git clone https://github.com/Zhaolong666520/a-share-quant-lab.git
+cd a-share-quant-lab
+.\scripts\setup.ps1
+.\.venv\Scripts\python.exe -m finance_lab.cli demo
 ```
 
-程序会尝试从2018年开始下载两个示例标的，保存数据并生成回测报告。网络数据源随时可能
-改变；如果一个来源失败，程序会记录原因并尝试另一个来源，不会伪造行情。
+验证整个项目：
 
-真实数据报告位于 `outputs/`，文件名类似：
-
-```text
-sh_000300_sma_report.html
-sh_510300_sma_report.html
+```powershell
+.\verify.cmd
 ```
 
-## 运行样本外实验
+## 建议学习路线
 
-真实数据已经存在后，双击：
+| 阶段 | 先读 | 再运行 | 你要回答的问题 |
+| --- | --- | --- | --- |
+| 1. 回测基础 | [`第一课`](docs/第一课.md) | `run_demo.cmd` | 收益、回撤和基准分别说明什么？ |
+| 2. 样本外 | [`第二课`](docs/第二课.md) | `run_experiment.cmd` | 参数是否在看结果前固定？ |
+| 3. 滚动检验 | [`第三课`](docs/第三课.md) | `run_walk_forward.cmd` | 结论是否只依赖某一个历史区间？ |
+| 4. 成本压力 | [`第四课`](docs/第四课.md) | `run_cost_stress.cmd` | 成本提高后结果是否单调变差？ |
+| 5. 参数稳健性 | [`第五课`](docs/第五课.md) | `run_parameter_test.cmd` | 好结果是连续区域还是孤立参数点？ |
+| 6. 执行可行性 | [`第六课`](docs/第六课.md) | `run_execution_test.cmd` | 延迟和受阻会改变多少结果？ |
+| 7. 数据与账本 | [`第七课`](docs/第七课.md) | `run_data_health.cmd` → `run_account.cmd` | 数据身份和账户余额能否逐项对上？ |
 
-```text
-run_experiment.cmd
-```
+<details>
+<summary><strong>展开：真实数据与全部命令</strong></summary>
 
-它会固定使用2023年1月1日作为切分点，不自动调参，并生成：
+### 更新真实数据
 
-```text
-sh_000300_sma_split_<实验ID>_report.html
-sh_000300_sma_split_<实验ID>_trades.csv
-sh_510300_sma_split_<实验ID>_report.html
-sh_510300_sma_split_<实验ID>_trades.csv
-```
+双击 `update_data.cmd`。程序默认从 2018 年开始尝试更新示例标的。外部数据源失败时，它会记录原因并尝试备用来源，不会伪造行情。
 
-实验ID包含引擎版本、切分日、均线参数、成本和数据指纹，因此不同代码、参数或数据不会互相
-覆盖。
-
-阅读 `docs/第二课.md`，了解开发期、样本外期以及为什么不能根据测试结果反复调参。
-
-## 运行滚动稳定性检验
-
-完成固定切分实验后，双击：
-
-```text
-run_walk_forward.cmd
-```
-
-程序会从2021年开始，按12个月划分互不重叠的历史窗口。20/60参数保持固定，不根据任何窗口
-自动调节。报告文件名类似：
-
-```text
-sh_000300_sma_walk_<实验ID>_report.html
-sh_510300_sma_walk_<实验ID>_report.html
-```
-
-阅读 `docs/第三课.md`。注意：这些历史日期已经被我们看过，因此滚动报告是稳定性诊断，不是
-全新的、从未观察过的样本外证据。
-
-## 运行交易成本压力测试
-
-双击：
-
-```text
-run_cost_stress.cmd
-```
-
-程序会固定信号和窗口，仅把假设单边成本依次设为5、10、20、50个基点。报告文件名类似：
-
-```text
-sh_000300_sma_cost_<实验ID>_report.html
-sh_510300_sma_cost_<实验ID>_report.html
-```
-
-这些数字只用于压力测试，不代表当前券商费率、税率或真实滑点。阅读 `docs/第四课.md`，理解
-为什么交易次数越多，成本假设越重要。
-
-## 运行参数稳健性检验
-
-双击：
-
-```text
-run_parameter_test.cmd
-```
-
-程序会固定数据、滚动窗口和5 bps假设成本，比较短均线10/20/30与长均线40/60/90组成的
-九组参数。20/60是预先指定的参照组，程序不会自动挑选“最佳参数”。报告文件名类似：
-
-```text
-sh_000300_sma_param_<实验ID>_report.html
-sh_510300_sma_param_<实验ID>_report.html
-```
-
-阅读 `docs/第五课.md`，重点查看正收益组合数、收益中位数、收益范围以及热力图中好结果是否
-只出现在孤立格子。本实验是回顾性诊断，不是参数推荐。
-
-## 运行执行可行性压力测试
-
-双击：
-
-```text
-run_execution_test.cmd
-```
-
-程序固定20/60双均线和5 bps假设成本，比较理想次日开盘、统一额外延迟一个交易日、以及
-零成交量/全天单一价格跳空的事后日线阻塞代理。报告文件名类似：
-
-```text
-sh_000300_sma_exec_<实验ID>_report.html
-sh_510300_sma_exec_<实验ID>_report.html
-```
-
-9.5%跳空阈值只是教学压力代理，不是当前涨跌停规则；它使用收盘后才完整获得的当日K线，
-不能当作开盘时可知的条件。阅读 `docs/第六课.md`，重点查看收益变化、仓位不同天数、受阻尝试
-和逐行一致性检查。三个场景在切分日前使用相同理想仓位，压力只从样本外边界开始。指数本身
-不能直接交易。
-
-## 检查数据身份与新鲜度
-
-双击：
-
-```text
-run_data_health.cmd
-```
-
-它不会联网，而是给当前 `data/curated/` 中每个Parquet文件计算SHA-256，并生成一个稳定的
-数据集ID，同时列出来源、日期区间、复权方式、成交量单位、近似滞后工作日以及上次更新失败
-信息。报告文件名类似：
-
-```text
-dataset_manifest_<数据集ID前12位>_r<检查上下文哈希>_report.html
-```
-
-陈旧天数目前只按周一至周五近似，尚未纳入交易所节假日。正式实验前先看这份报告；出现
-“提醒”不等于文件损坏，但必须理解并记录提醒原因。
-
-## 运行真实账户账本
-
-确认数据身份后，双击：
-
-```text
-run_account.cmd
-```
-
-程序只处理配置中标为ETF或股票的标的，指数会明确跳过。默认使用10万元现金、100份一手、
-3 bps假设佣金（最低5元）、0 bps假设卖出税费和2 bps假设单边滑点。报告、逐笔成交CSV、
-指标JSON和净值图会写入 `outputs/`。所有费率都只是可修改的教学情景，不代表当前真实标准。
-
-阅读 `docs/第七课.md`，重点查看现金、份额、费用与权益是否逐日对上。当前模型尚未处理分红、
-除权现金流、部分成交、排队和市场冲击，因此不能用于真实下单。
-
-## 验证项目
-
-双击 `verify.cmd`，它会依次运行代码检查、类型检查、自动测试和编译检查。
-
-## 关于发布压缩包
-
-`scripts/package_release.ps1` 生成的是源码包 `finance-lab-source-v7.zip`。为避免重新分发第三方
-行情，它只保留空的 `data/` 和 `outputs/`，不能单独复现实验006的精确历史结果。实验记录中的
-数据集ID和文件SHA-256用于核对；本次实际HTML、JSON、CSV和图表作为单独交付物保存在项目外层
-`outputs/`。如要在另一台电脑重跑，必须取得相同哈希且有权使用的数据快照。
-
-## 常用命令
-
-在项目目录打开 PowerShell：
+### 常用命令
 
 ```powershell
 .\.venv\Scripts\python.exe -m finance_lab.cli demo
-.\.venv\Scripts\python.exe -m finance_lab.cli fetch --start 2018-01-01 --end 2026-08-14
+.\.venv\Scripts\python.exe -m finance_lab.cli fetch --start 2018-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli validate
 .\.venv\Scripts\python.exe -m finance_lab.cli backtest --symbol sh.000300
 .\.venv\Scripts\python.exe -m finance_lab.cli experiment-all --split-date 2023-01-01
@@ -211,47 +105,75 @@ run_account.cmd
 .\.venv\Scripts\python.exe -m finance_lab.cli cost-stress-all --costs 5,10,20,50
 .\.venv\Scripts\python.exe -m finance_lab.cli parameter-test-all --shorts 10,20,30 --longs 40,60,90
 .\.venv\Scripts\python.exe -m finance_lab.cli execution-test-all --delay-days 1 --lock-threshold 0.095
-.\.venv\Scripts\python.exe -m finance_lab.cli manifest --as-of 2026-08-24
+.\.venv\Scripts\python.exe -m finance_lab.cli manifest
 .\.venv\Scripts\python.exe -m finance_lab.cli account --symbol sh.510300
 ```
 
-## 目录
+### 输出文件
+
+所有报告写入 `outputs/`。正式实验 ID 会包含引擎版本、参数、切分、成本和数据指纹，避免不同实验静默覆盖。数据健康报告命名示例：
 
 ```text
-finance-lab/
-├─ AGENTS.md              所有AI共同遵守的项目规则
-├─ config/                研究标的配置
-├─ data/raw/              原始数据快照，不进入Git
-├─ data/curated/          校验后的规范数据，不进入Git
-├─ data/finance_lab.duckdb 本地数据库，不进入Git
-├─ docs/                  中文学习资料与数据说明
-├─ experiments/           实验参数与结论
-├─ outputs/               HTML报告、图表和指标
-├─ research/              研究员AI的资料与假设
-├─ src/                   程序源码
-└─ tests/                 自动测试
+dataset_manifest_<数据集ID前12位>_r<检查上下文哈希>_report.html
 ```
 
-## 当前限制
+</details>
 
-- 第一阶段只处理日线，不处理分钟、逐笔和实时行情。
-- 停牌和单一价格跳空仅有事后日线压力代理，尚未模拟订单队列、部分成交、申购赎回、分红税和冲击成本。
-- ETF使用不复权数据，长期收益不等于含分红再投资的真实总回报。
-- 数据陈旧度使用工作日近似，尚未接入交易所交易日历。
-- 账户账本尚未处理分红、除权现金流、部分成交、排队和市场冲击。
-- 双均线只是教学基准，不能据此直接买卖。
-- 数据源属于研究级公共接口，没有生产级稳定性保证。
+## 研究护栏
 
-## 推荐学习顺序
+本仓库的 [`AGENTS.md`](AGENTS.md) 不只是协作说明，也是研究纪律：
 
-1. 阅读 `docs/第一课.md`。
-2. 运行离线演示，先看最大回撤和基准对比。
-3. 更新真实数据，阅读 `outputs/update_summary.json` 中的数据源状态。
-4. 阅读 `docs/第二课.md` 并运行固定切分实验。
-5. 不修改参数，先理解为什么“历史表现好”不代表未来赚钱。
-6. 阅读 `docs/第三课.md`，双击 `run_walk_forward.cmd`，比较每个历史窗口。
-7. 阅读 `docs/第四课.md`，双击 `run_cost_stress.cmd`，观察成本提高后的收益变化。
-8. 阅读 `docs/第五课.md`，双击 `run_parameter_test.cmd`，检查结论是否依赖单一参数。
-9. 阅读 `docs/第六课.md`，双击 `run_execution_test.cmd`，检查延迟与成交受阻的影响。
-10. 阅读 `docs/第七课.md`，先双击 `run_data_health.cmd`，再双击 `run_account.cmd`。
-11. 在进入分钟线前，继续完善分红、除权、真实费用规则、订单簿和部分成交约束。
+1. 原始数据只新增快照，不静默覆盖。
+2. 信号至少延迟到下一交易日，禁止未来函数。
+3. 看过样本外结果后，不修改同一实验的切分或参数。
+4. 费率、税率和涨跌停代理若没有权威规则，只能标为假设情景。
+5. 亏损或落后基准的实验必须保留。
+6. 正式报告必须先通过代码测试、数据校验和一致性检查。
+
+## 项目结构
+
+```text
+a-share-quant-lab/
+├─ AGENTS.md               AI 与研究协作规则
+├─ config/                 标的与账户配置
+├─ data/raw/               原始快照（不进入 Git）
+├─ data/curated/           规范数据（不进入 Git）
+├─ docs/                   七节中文课程与数据说明
+├─ experiments/            固定参数、假设和全部结论
+├─ outputs/                HTML / PNG / JSON / CSV
+├─ research/               研究资料与新假设
+├─ scripts/                Windows 运行、验证与打包脚本
+├─ src/finance_lab/        Python 实现
+└─ tests/                  自动化测试
+```
+
+Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免已有脚本和安装方式失效；GitHub 仓库品牌名为 **A-Share Quant Lab**。
+
+## 当前边界
+
+- 目前以日线教学为主，不处理分钟、逐笔和实时行情。
+- 执行阻塞是收盘后可知的事后日线压力代理，不是开盘可知的交易所规则。
+- ETF 使用不复权数据，账户模型尚未处理分红、除权现金流、部分成交、排队和市场冲击。
+- 陈旧度按工作日近似，尚未接入交易所完整交易日历。
+- AKShare 与 BaoStock 是研究级公共接口，不提供生产级稳定性保证。
+- 双均线只是用于验证研究流程的教学基准，不能据此直接买卖。
+
+## 路线图
+
+- [ ] 交易所交易日历与节假日感知的数据健康检查
+- [ ] 分红、除权和现金分配账本
+- [ ] 更多不依赖“最佳参数”的基准策略
+- [ ] Linux/macOS 一键脚本与容器化环境
+- [ ] 可选的分钟线研究层（与日线证据链分离）
+
+欢迎通过 [Issue](https://github.com/Zhaolong666520/a-share-quant-lab/issues) 提建议，或阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md) 提交 PR。尤其欢迎数据质量、未来信息、费用口径和边界条件方面的审查。
+
+## 发布包
+
+`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.7.0.zip`。源码包不重新分发第三方行情，只保留空的 `data/` 与 `outputs/`，因此不能单独复现实验 006 的精确历史结果。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
+
+## 许可证与免责声明
+
+代码以 [MIT License](LICENSE) 开源。行情数据及其使用权仍受各数据提供方条款约束，不因代码许可证而改变。
+
+本项目仅用于学习与研究，不连接券商、不自动交易、不构成投资建议。历史结果、合成数据和压力情景都不代表未来表现。

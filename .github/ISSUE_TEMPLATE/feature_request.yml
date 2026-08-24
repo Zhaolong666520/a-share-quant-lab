@@ -1,0 +1,33 @@
+name: 功能建议
+description: 提议新的研究、数据质量或教学能力
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题？
+      description: 请先描述研究或学习障碍，而不只是某个实现。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明输入、输出、边界条件和如何验证。
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: 数据与回测风险
+      description: 是否可能引入未来信息、数据授权、选择性报告或费用口径问题？
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已阅读 AGENTS.md，并愿意保留不理想的实验结果。
+          required: true
