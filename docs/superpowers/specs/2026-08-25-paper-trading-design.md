@@ -1,6 +1,6 @@
 # v0.9 前向模拟盘设计
 
-状态：已通过口头设计确认，等待用户审阅书面规格
+状态：用户已批准；实施计划编写中
 
 日期：2026-08-25
 
@@ -150,7 +150,7 @@ open、close、费用或计算结果出现 NaN、无穷、非正权益、负现�
 
 ### 9.1 paper-init
 
-paper-init 不联网。它读取现有整理数据和最新数据清单，要求 sh.510300 文件健康、来源上下文明确、文件 SHA-256 在读取前后保持一致，且不存在目标标的的上游错误或陈旧警告。
+paper-init 不联网。它读取现有整理数据、最新数据清单和 update_summary.json，要求 sh.510300 文件不存在阻断问题、来源上下文明确、最近一次更新中目标标的 rows 大于 0 且 curated_file 非空，并且文件 SHA-256 在读取前后保持一致。单个数据源失败可以由另一个成功来源降级承接，但失败详情必须写入账本和报告。
 
 初始化在一个事务中完成：
 
@@ -168,7 +168,7 @@ paper-init 不联网。它读取现有整理数据和最新数据清单，要求
 paper-run 不联网，只消费已经存在的规范 Parquet。运行顺序为：
 
 1. 获取本地独占运行锁，再连接 DuckDB。
-2. 生成并验证数据清单、目标文件完整 SHA-256 和目标标的数据健康上下文。
+2. 使用明确的 as_of 日期生成并验证数据清单、最近一次更新摘要、目标文件完整 SHA-256 和目标标的数据健康上下文。
 3. 审计账户配置、事件哈希链和状态缓存。
 4. 找出 last_trade_date 之后的所有新日线并按日期升序处理。
 5. 对每根日线、两个账户执行：处理旧待成交订单、收盘估值、计算新信号、创建新待成交订单。
@@ -184,8 +184,8 @@ paper-run 不联网，只消费已经存在的规范 Parquet。运行顺序为�
 run_paper_trading.cmd 面向 Windows 初学者，严格串行执行：
 
 1. 使用现有 fetch 流程更新行情。
-2. 运行 manifest 健康检查。
-3. 运行 paper-run。
+2. 运行 manifest 健康检查，并让 manifest 与 paper-run 使用同一个当天 as_of 日期。
+3. 运行 paper-run，并传入同一个 as_of 日期。
 4. 运行 paper-status 并打开最新 HTML。
 
 任一步返回非零退出码，脚本立即停止，不打印成功提示。CLI 的 paper-run 保持离线和确定性，便于测试与复现。
@@ -198,13 +198,13 @@ run_paper_trading.cmd 面向 Windows 初学者，严格串行执行：
 - adjustment、source、volume_unit 和 ingested_at 有效且一致。
 - 价格、日期和主键校验通过。
 - 文件 error_codes 为空。
-- 文件 warning_codes 为空。
-- 目标标的 upstream_errors 为空。
+- 文件 warning_codes 中不得包含 stale_data、large_date_gap 或任何未知警告。unadjusted_prices 和 mixed_sources 是允许继续但必须披露的已知提醒。
+- 最近一次 update_summary.json 必须结构合法、end 等于本次 as_of 日期，且目标标的记录 rows 大于 0、curated_file 非空。目标标的可以存在某个来源的 upstream_errors，但必须同时存在成功更新记录并完整披露错误。
 - business_days_stale 不超过命令采用的固定阈值。
 - 读取前后的文件 SHA-256 与清单一致。
 - 新 trade_date 严格递增，不早于账户 created_market_date。
 
-全局清单中与目标标的无关的警告写入报告，但不阻止模拟盘。目标标的任何警告都采取保守策略：不成交、不生成新信号、不改变状态，并返回非零退出码和结构化错误报告。
+全局清单中与目标标的无关的警告写入报告，但不阻止模拟盘。目标标的出现 error_codes、阻断 warning、更新摘要缺失或不匹配、全部来源失败、数据陈旧或文件变化时，采取保守策略：不成交、不生成新信号、不改变状态，并返回非零退出码和结构化错误报告。
 
 ## 11. 并发、事务与恢复
 
@@ -220,8 +220,8 @@ run_paper_trading.cmd 面向 Windows 初学者，严格串行执行：
 
 新增命令的稳定用户语义：
 
-- finance-lab paper-init：创建默认账户组。支持 portfolio、initial-cash、lot-size、commission-bps、minimum-commission、sell-tax-bps、slippage-bps 和 stale-after-business-days 参数。
-- finance-lab paper-run：处理指定账户组的全部未处理日线。支持 portfolio 和 stale-after-business-days 参数。
+- finance-lab paper-init：创建默认账户组。支持 portfolio、initial-cash、lot-size、commission-bps、minimum-commission、sell-tax-bps、slippage-bps、as-of 和 stale-after-business-days 参数。
+- finance-lab paper-run：处理指定账户组的全部未处理日线。支持 portfolio、as-of 和 stale-after-business-days 参数。
 - finance-lab paper-status：只读审计并生成指定账户组的当前报告。支持 portfolio 参数。
 
 所有命令输出 UTF-8 JSON 摘要并使用非零退出码表达失败。路径、账户组名、SHA-256 和数据库枚举值均在进入文件名、SQL 或报告前校验。SQL 只使用参数绑定，不拼接用户输入。
