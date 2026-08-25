@@ -41,6 +41,14 @@ def _metric_rows(strategy: BacktestMetrics, benchmark: BacktestMetrics) -> str:
     )
 
 
+def _strategy_description(result: BacktestResult) -> str:
+    if result.strategy == "sma":
+        return f"{result.short_window}/{result.long_window} 日双均线"
+    if result.strategy == "momentum":
+        return f"{result.momentum_lookback} 日时间序列动量"
+    return "买入并持有"
+
+
 def write_backtest_report(
     result: BacktestResult,
     paths: ProjectPaths,
@@ -97,7 +105,8 @@ def write_backtest_report(
 <body>
   <h1>{html.escape(display_title)}</h1>
   <p class="warning"><strong>重要：</strong>{html.escape(warning)}</p>
-  <p>数据来源：<code>{html.escape(source)}</code>；策略：<code>{result.strategy}</code>；
+  <p>数据来源：<code>{html.escape(source)}</code>；策略：
+     <code>{html.escape(_strategy_description(result))}</code>；
      单边成本假设：<code>{result.cost_bps:.1f} bps</code>。</p>
   <p>信号在当日收盘后生成，最早于下一交易日开盘执行，避免使用当日尚未知道的信息。</p>
   <table>
@@ -115,6 +124,10 @@ def write_backtest_report(
     payload = {
         "symbol": result.symbol,
         "strategy": result.strategy,
+        "strategy_description": _strategy_description(result),
+        "short_window": result.short_window,
+        "long_window": result.long_window,
+        "momentum_lookback": result.momentum_lookback,
         "source": source,
         "synthetic": synthetic,
         "cost_bps": result.cost_bps,

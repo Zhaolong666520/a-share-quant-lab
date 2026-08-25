@@ -6,7 +6,24 @@
 
 ### Planned
 
-- 交易所交易日历、分红/除权现金流和更丰富的稳健性基准。
+- 交易所交易日历、分红/除权现金流和跨平台运行脚本。
+
+## [0.8.0] - 2026-08-25
+
+### Added
+
+- 120 日时间序列动量教学基准，信号在收盘后生成并延迟到下一交易日执行。
+- 固定三策略对比实验，共用数据、切分、成本和买入持有基准。
+- 中文 HTML、样本外净值图、JSON、CSV，以及 Windows 一键运行脚本和第八课文档。
+
+### Changed
+
+- 基础回测命令支持 `momentum`，并在报告中保存策略参数。
+- 正式多策略对比绑定数据集 ID、整理文件 SHA-256 和数据健康状态。
+
+### Security
+
+- 拒绝非有限成本、非正净值因子和未在首个样本外交易日前完成预热的指标。
 
 ## [0.7.0] - 2026-08-24
 
@@ -30,5 +47,6 @@
 
 - 锁定兼容 Python 3.11–3.13 的 NumPy 版本，并让 CI 在依赖安装失败时立即中止。
 
-[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Zhaolong666520/a-share-quant-lab/releases/tag/v0.7.0

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "finance-lab"
-version = "0.7.0"
+version = "0.8.0"
 description = "面向初学者的 A 股日线数据与可复现回测实验室"
 readme = "README.md"
 license = "MIT"

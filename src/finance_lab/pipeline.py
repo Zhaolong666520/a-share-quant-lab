@@ -34,6 +34,8 @@ from finance_lab.storage import (
     save_raw_snapshot,
     sync_duckdb,
 )
+from finance_lab.strategy_comparison import run_strategy_comparison
+from finance_lab.strategy_comparison_report import write_strategy_comparison_report
 from finance_lab.validation import (
     assert_valid_daily_prices,
     compare_sources,
@@ -222,6 +224,7 @@ def backtest_symbol(
     strategy: str = "sma",
     short_window: int = 20,
     long_window: int = 60,
+    momentum_lookback: int = 120,
     cost_bps: float = 5.0,
     root: Path | None = None,
 ) -> tuple[Path, dict[str, float | int]]:
@@ -232,10 +235,68 @@ def backtest_symbol(
         strategy=strategy,
         short_window=short_window,
         long_window=long_window,
+        momentum_lookback=momentum_lookback,
         cost_bps=cost_bps,
     )
     html_path, _, _ = write_backtest_report(result, paths)
     return html_path, result.metrics.to_dict()
+
+
+def strategy_compare_symbol(
+    symbol: str,
+    split_date: date,
+    short_window: int = 20,
+    long_window: int = 60,
+    momentum_lookback: int = 120,
+    cost_bps: float = 5.0,
+    root: Path | None = None,
+) -> tuple[Path, dict[str, object]]:
+    paths = get_paths(root)
+    manifest = generate_dataset_manifest(paths)
+    manifest_item = next((item for item in manifest.files if item.symbol == symbol), None)
+    if manifest_item is None:
+        raise ValueError(f"数据清单中没有 {symbol}")
+    if manifest_item.error_codes:
+        raise ValueError(f"{symbol} 数据健康检查失败：{manifest_item.error_codes}")
+    prices = read_curated(symbol, paths)
+    curated_path = (paths.root / manifest_item.relative_path).resolve()
+    if file_sha256(curated_path) != manifest_item.sha256:
+        raise RuntimeError(f"{symbol} 在清单生成后发生变化，请重试")
+    symbol_upstream_errors = manifest.upstream_errors.get(symbol, {})
+    file_health_status = (
+        "warning"
+        if manifest_item.warning_codes or symbol_upstream_errors
+        else "pass"
+    )
+    result = run_strategy_comparison(
+        prices,
+        split_date=split_date,
+        short_window=short_window,
+        long_window=long_window,
+        momentum_lookback=momentum_lookback,
+        cost_bps=cost_bps,
+        dataset_id=manifest.dataset_id,
+        curated_file_sha256=manifest_item.sha256,
+        data_health_status=file_health_status,
+        manifest_health_status=manifest.health_status,
+        manifest_generated_at=manifest.generated_at,
+        manifest_as_of_date=manifest.as_of_date,
+        business_days_stale=manifest_item.business_days_stale,
+        data_warning_codes=manifest_item.warning_codes,
+        upstream_errors=symbol_upstream_errors,
+        data_start_date=manifest_item.start_date,
+        data_end_date=manifest_item.end_date,
+        data_sources=manifest_item.sources,
+        data_adjustments=manifest_item.adjustments,
+        data_volume_units=manifest_item.volume_units,
+    )
+    html_path, _, _, _ = write_strategy_comparison_report(result, paths)
+    payload: dict[str, object] = {
+        "settings": result.settings_dict(),
+        "benchmark_metrics": result.benchmark_metrics.to_dict(),
+        "scenarios": [scenario.to_dict() for scenario in result.scenarios],
+    }
+    return html_path, payload
 
 
 def experiment_symbol(

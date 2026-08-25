@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-0.7.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
 [![License](https://img.shields.io/github/license/Zhaolong666520/a-share-quant-lab)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Zhaolong666520/a-share-quant-lab?style=social)](https://github.com/Zhaolong666520/a-share-quant-lab/stargazers)
 
@@ -18,7 +18,7 @@
 
 - **拒绝未来函数**：信号至少延迟到下一交易日执行，并用逐行检查守住边界。
 - **数据有身份证**：每份正式数据都有 SHA-256、数据集 ID、来源、采集时间、复权方式和陈旧状态。
-- **不只看一条漂亮曲线**：固定参数后依次做样本外、滚动窗口、成本、参数和执行可行性压力测试。
+- **不只看一条漂亮曲线**：固定比较买入持有、双均线和时间序列动量，再做样本外与多类压力测试。
 - **按真实账户约束记账**：现金、100 份整手、最低佣金、卖出税费和滑点逐日对账。
 - **亏损结果也保留**：项目明确禁止删除落后基准的实验，也不把合成数据冒充真实行情。
 - **Windows 友好**：常用流程都提供可双击的 `.cmd`，同时保留完整 Python CLI。
@@ -37,7 +37,8 @@
 | 数据接入 | AKShare 获取 A 股指数与 ETF 日线；BaoStock 用于抽样核对 |
 | 数据存储 | 不可变原始快照、规范 Parquet、DuckDB |
 | 数据健康 | 重复日期、OHLC 关系、空值、异常间隔、陈旧状态、来源失败 |
-| 基础回测 | 买入持有与双均线；信号次日执行并扣除成本 |
+| 基础回测 | 买入持有、双均线与时间序列动量；信号次日执行并扣除成本 |
+| 策略对比 | 三种固定规则共用数据、切分、成本和基准，不自动挑选历史赢家 |
 | 稳健性 | 固定切分、walk-forward、成本压力、参数热力图 |
 | 执行压力 | 额外延迟与事后日线阻塞代理；受阻订单保留原仓位 |
 | 账户账本 | 现金、整手、最低佣金、卖出费用、滑点和逐日对账 |
@@ -85,6 +86,7 @@ cd a-share-quant-lab
 | 5. 参数稳健性 | [`第五课`](docs/第五课.md) | `run_parameter_test.cmd` | 好结果是连续区域还是孤立参数点？ |
 | 6. 执行可行性 | [`第六课`](docs/第六课.md) | `run_execution_test.cmd` | 延迟和受阻会改变多少结果？ |
 | 7. 数据与账本 | [`第七课`](docs/第七课.md) | `run_data_health.cmd` → `run_account.cmd` | 数据身份和账户余额能否逐项对上？ |
+| 8. 策略对比 | [`第八课`](docs/第八课.md) | `run_strategy_compare.cmd` | 不同固定规则在同一把尺子下有何差异？ |
 
 <details>
 <summary><strong>展开：真实数据与全部命令</strong></summary>
@@ -107,6 +109,7 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli execution-test-all --delay-days 1 --lock-threshold 0.095
 .\.venv\Scripts\python.exe -m finance_lab.cli manifest
 .\.venv\Scripts\python.exe -m finance_lab.cli account --symbol sh.510300
+.\.venv\Scripts\python.exe -m finance_lab.cli compare-all --split-date 2023-01-01
 ```
 
 ### 输出文件
@@ -138,7 +141,7 @@ a-share-quant-lab/
 ├─ config/                 标的与账户配置
 ├─ data/raw/               原始快照（不进入 Git）
 ├─ data/curated/           规范数据（不进入 Git）
-├─ docs/                   七节中文课程与数据说明
+├─ docs/                   八节中文课程与数据说明
 ├─ experiments/            固定参数、假设和全部结论
 ├─ outputs/                HTML / PNG / JSON / CSV
 ├─ research/               研究资料与新假设
@@ -156,13 +159,13 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 - ETF 使用不复权数据，账户模型尚未处理分红、除权现金流、部分成交、排队和市场冲击。
 - 陈旧度按工作日近似，尚未接入交易所完整交易日历。
 - AKShare 与 BaoStock 是研究级公共接口，不提供生产级稳定性保证。
-- 双均线只是用于验证研究流程的教学基准，不能据此直接买卖。
+- 买入持有、双均线和时间序列动量都只是教学基准，不能据此直接买卖。
 
 ## 路线图
 
 - [ ] 交易所交易日历与节假日感知的数据健康检查
 - [ ] 分红、除权和现金分配账本
-- [ ] 更多不依赖“最佳参数”的基准策略
+- [x] 更多不依赖“最佳参数”的基准策略（固定三策略对比）
 - [ ] Linux/macOS 一键脚本与容器化环境
 - [ ] 可选的分钟线研究层（与日线证据链分离）
 
@@ -170,7 +173,7 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 
 ## 发布包
 
-`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.7.0.zip`。源码包不重新分发第三方行情，只保留空的 `data/` 与 `outputs/`，因此不能单独复现实验 006 的精确历史结果。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
+`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.8.0.zip`。源码包不重新分发第三方行情，只保留空的 `data/` 与 `outputs/`，因此不能单独复现实验 006/007 的精确历史结果。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
 
 ## 许可证与免责声明
 

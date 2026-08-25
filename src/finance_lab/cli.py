@@ -16,6 +16,7 @@ from finance_lab.pipeline import (
     execution_test_symbol,
     experiment_symbol,
     parameter_test_symbol,
+    strategy_compare_symbol,
     update_market_data,
     validate_curated_data,
     walk_forward_symbol,
@@ -106,9 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backtest = subparsers.add_parser("backtest", help="对本地整理数据运行回测")
     backtest.add_argument("--symbol", default="sh.000300")
-    backtest.add_argument("--strategy", choices=["sma", "buy_hold"], default="sma")
+    backtest.add_argument(
+        "--strategy", choices=["sma", "buy_hold", "momentum"], default="sma"
+    )
     backtest.add_argument("--short", type=int, default=20)
     backtest.add_argument("--long", type=int, default=60)
+    backtest.add_argument("--momentum-lookback", type=int, default=120)
     backtest.add_argument("--cost-bps", type=float, default=5.0)
 
     experiment = subparsers.add_parser("experiment", help="运行固定切分的样本外实验")
@@ -203,6 +207,27 @@ def build_parser() -> argparse.ArgumentParser:
     execution_all.add_argument("--delay-days", type=int, default=1)
     execution_all.add_argument("--lock-threshold", type=float, default=0.095)
 
+    compare = subparsers.add_parser(
+        "compare",
+        help="在相同切分和成本下对比买入持有、双均线与时间序列动量",
+    )
+    compare.add_argument("--symbol", default="sh.000300")
+    compare.add_argument("--split-date", type=_parse_date, default=date(2023, 1, 1))
+    compare.add_argument("--short", type=int, default=20)
+    compare.add_argument("--long", type=int, default=60)
+    compare.add_argument("--momentum-lookback", type=int, default=120)
+    compare.add_argument("--cost-bps", type=float, default=5.0)
+
+    compare_all = subparsers.add_parser(
+        "compare-all",
+        help="对全部配置标的生成固定多策略对比报告",
+    )
+    compare_all.add_argument("--split-date", type=_parse_date, default=date(2023, 1, 1))
+    compare_all.add_argument("--short", type=int, default=20)
+    compare_all.add_argument("--long", type=int, default=60)
+    compare_all.add_argument("--momentum-lookback", type=int, default=120)
+    compare_all.add_argument("--cost-bps", type=float, default=5.0)
+
     subparsers.add_parser("validate", help="检查本地整理数据")
 
     all_command = subparsers.add_parser("all", help="更新数据并回测全部配置标的")
@@ -279,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                 strategy=args.strategy,
                 short_window=args.short,
                 long_window=args.long,
+                momentum_lookback=args.momentum_lookback,
                 cost_bps=args.cost_bps,
             )
             print(f"回测报告已生成：{report}")
@@ -428,6 +454,33 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 reports.append({"symbol": instrument.symbol, "report": str(report), **payload})
                 print(f"执行可行性压力测试报告已生成：{report}")
+            _print_json(reports)
+            return 0
+        if args.command == "compare":
+            report, payload = strategy_compare_symbol(
+                args.symbol,
+                split_date=args.split_date,
+                short_window=args.short,
+                long_window=args.long,
+                momentum_lookback=args.momentum_lookback,
+                cost_bps=args.cost_bps,
+            )
+            print(f"多策略对比报告已生成：{report}")
+            _print_json(payload)
+            return 0
+        if args.command == "compare-all":
+            reports = []
+            for instrument in load_instruments(get_paths().root):
+                report, payload = strategy_compare_symbol(
+                    instrument.symbol,
+                    split_date=args.split_date,
+                    short_window=args.short,
+                    long_window=args.long,
+                    momentum_lookback=args.momentum_lookback,
+                    cost_bps=args.cost_bps,
+                )
+                reports.append({"symbol": instrument.symbol, "report": str(report), **payload})
+                print(f"多策略对比报告已生成：{report}")
             _print_json(reports)
             return 0
         if args.command == "validate":

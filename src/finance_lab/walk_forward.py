@@ -215,6 +215,8 @@ def run_walk_forward(
     min_fold_observations: int = 60,
 ) -> WalkForwardResult:
     """Evaluate fixed parameters in consecutive, non-overlapping OOS windows."""
+    if strategy not in {"sma", "buy_hold"}:
+        raise ValueError("滚动检验目前只支持 sma 或 buy_hold")
     if type(fold_months) is not int or fold_months <= 0:
         raise ValueError("fold_months 必须是大于0的整数")
     if type(min_development_observations) is not int or min_development_observations < 2:
