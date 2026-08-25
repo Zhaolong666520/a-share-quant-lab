@@ -130,7 +130,20 @@ def _extract_trades(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def data_fingerprint(prices: pd.DataFrame) -> str:
-    columns = ["symbol", "trade_date", "open", "high", "low", "close", "source"]
+    columns = [
+        "symbol",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "volume_unit",
+        "amount",
+        "adjustment",
+        "source",
+        "ingested_at",
+    ]
     canonical = prices[columns].sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     hashed = pd.util.hash_pandas_object(canonical, index=False).to_numpy().tobytes()
     return hashlib.sha256(hashed).hexdigest()
@@ -160,6 +173,8 @@ def run_split_experiment(
     cost_bps: float = 5.0,
     min_period_observations: int = 120,
 ) -> SplitExperimentResult:
+    if strategy not in {"sma", "buy_hold"}:
+        raise ValueError("固定切分实验目前只支持 sma 或 buy_hold")
     if min_period_observations < 2:
         raise ValueError("min_period_observations must be at least 2")
     full_result = run_backtest(
