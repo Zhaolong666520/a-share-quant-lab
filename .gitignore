@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 package_staging_*/
 package_verify_*/
+.worktrees/
 data/raw/
 data/curated/
 data/*.duckdb
