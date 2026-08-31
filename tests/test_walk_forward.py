@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -258,10 +259,10 @@ def test_walk_forward_rejects_non_integer_window_settings(
 ) -> None:
     prices = make_synthetic_daily_prices(periods=1000)
     with pytest.raises(ValueError, match=expected_name):
-        run_walk_forward(  # type: ignore[arg-type]
+        run_walk_forward(
             prices,
             first_oos_date=date(2023, 1, 1),
-            **kwargs,
+            **cast(Any, kwargs),
         )
 
 

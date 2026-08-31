@@ -17,7 +17,9 @@ def test_parquet_and_duckdb_round_trip(tmp_path: Path) -> None:
     restored = read_curated("demo.000300", paths)
     assert len(restored) == 150
     with duckdb.connect(str(paths.database), read_only=True) as connection:
-        count = connection.execute("SELECT COUNT(*) FROM daily_prices").fetchone()[0]
+        result = connection.execute("SELECT COUNT(*) FROM daily_prices").fetchone()
+    assert result is not None
+    count = result[0]
     assert count == 150
 
 

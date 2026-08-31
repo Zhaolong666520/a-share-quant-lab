@@ -54,4 +54,6 @@ def test_source_comparison_warns_when_date_coverage_is_low() -> None:
     secondary = primary.tail(20).copy()
     comparison = compare_sources(primary, secondary)
     assert comparison["status"] == "warning"
-    assert float(comparison["coverage_ratio"]) < 0.95
+    coverage_ratio = comparison["coverage_ratio"]
+    assert isinstance(coverage_ratio, float)
+    assert coverage_ratio < 0.95
