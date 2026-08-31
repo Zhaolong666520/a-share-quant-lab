@@ -8,6 +8,20 @@
 
 - 交易所交易日历、分红/除权现金流和跨平台运行脚本。
 
+## [0.9.0] - 2026-08-31
+
+### Added
+
+- 仅用于本地学习的前向模拟盘：固定 sh.510300 ETF、SMA 20/60 与 120 日动量两个隔离账户。
+- 追加式 DuckDB 事件账本、哈希链审计、可重建状态缓存、跨进程运行锁和同日双账户原子提交。
+- `paper-init`、`paper-run`、`paper-status` 命令，以及 `run_paper_trading.cmd` Windows 日常入口。
+- 确定性 HTML/JSON/CSV/PNG 审计报告，报告中的费用和滑点均明确为假设情景。
+
+### Security
+
+- 模拟盘只读取通过清单、更新摘要、SHA-256 与陈旧度检查的本地行情；数据异常时不产生订单或状态变更。
+- 不连接券商、不保存凭证、不发送真实订单；报告失败不会回滚已提交账本。
+
 ## [0.8.0] - 2026-08-25
 
 ### Added
@@ -47,6 +61,7 @@
 
 - 锁定兼容 Python 3.11–3.13 的 NumPy 版本，并让 CI 在依赖安装失败时立即中止。
 
-[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Zhaolong666520/a-share-quant-lab/releases/tag/v0.7.0

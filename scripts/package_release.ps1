@@ -1,6 +1,6 @@
 param(
     [ValidatePattern("^v[0-9]+(?:\.[0-9]+){0,2}$")]
-    [string]$Version = "v0.8.0"
+    [string]$Version = "v0.9.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,7 +8,7 @@ $env:PYTHONUTF8 = "1"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$DeliverablesRoot = (Resolve-Path (Join-Path $ProjectRoot "..\outputs")).Path
+$DeliverablesRoot = (Resolve-Path (Join-Path $ProjectRoot "outputs")).Path
 $StageLeaf = "package_staging_$Version"
 $VerifyLeaf = "package_verify_$Version"
 $StagePath = Join-Path $ProjectRoot $StageLeaf
@@ -69,6 +69,7 @@ $RootFiles = @(
     "run_execution_test.cmd",
     "run_experiment.cmd",
     "run_parameter_test.cmd",
+    "run_paper_trading.cmd",
     "run_strategy_compare.cmd",
     "run_walk_forward.cmd",
     "update_data.cmd",
@@ -80,16 +81,19 @@ $FifthLessonName = ([char]0x7B2C).ToString() + ([char]0x4E94).ToString() + ([cha
 $SixthLessonName = ([char]0x7B2C).ToString() + ([char]0x516D).ToString() + ([char]0x8BFE).ToString() + ".md"
 $SeventhLessonName = ([char]0x7B2C).ToString() + ([char]0x4E03).ToString() + ([char]0x8BFE).ToString() + ".md"
 $EighthLessonName = ([char]0x7B2C).ToString() + ([char]0x516B).ToString() + ([char]0x8BFE).ToString() + ".md"
+$NinthLessonName = ([char]0x7B2C).ToString() + ([char]0x4E5D).ToString() + ([char]0x8BFE).ToString() + ".md"
 $RequiredArchivePaths = @(
     (Join-Path "docs" $FourthLessonName),
     (Join-Path "docs" $FifthLessonName),
     (Join-Path "docs" $SixthLessonName),
     (Join-Path "docs" $SeventhLessonName),
     (Join-Path "docs" $EighthLessonName),
+    (Join-Path "docs" $NinthLessonName),
     "experiments\004_parameter_sensitivity.md",
     "experiments\005_execution_feasibility.md",
     "experiments\006_data_and_account_ledger.md",
     "experiments\007_strategy_comparison.md",
+    "experiments\008_forward_paper_trading.md",
     "requirements-lock.txt",
     "LICENSE",
     "CONTRIBUTING.md",
@@ -99,6 +103,7 @@ $RequiredArchivePaths = @(
     "docs\assets\social-preview.jpg",
     "docs\assets\account-equity.png",
     "docs\releases\v0.8.0.md",
+    "docs\releases\v0.9.0.md",
     "src\finance_lab\cost_sensitivity.py",
     "src\finance_lab\parameter_sensitivity.py",
     "src\finance_lab\parameter_sensitivity_report.py",
@@ -109,6 +114,12 @@ $RequiredArchivePaths = @(
     "src\finance_lab\ledger_report.py",
     "src\finance_lab\strategy_comparison.py",
     "src\finance_lab\strategy_comparison_report.py",
+    "src\finance_lab\paper_models.py",
+    "src\finance_lab\paper_engine.py",
+    "src\finance_lab\paper_lock.py",
+    "src\finance_lab\paper_store.py",
+    "src\finance_lab\paper_pipeline.py",
+    "src\finance_lab\paper_report.py",
     "src\finance_lab\cli.py",
     "src\finance_lab\pipeline.py",
     "tests\test_cost_sensitivity.py",
@@ -117,18 +128,29 @@ $RequiredArchivePaths = @(
     "tests\test_data_manifest.py",
     "tests\test_ledger.py",
     "tests\test_strategy_comparison.py",
+    "tests\test_paper_models.py",
+    "tests\test_paper_engine.py",
+    "tests\test_paper_lock.py",
+    "tests\test_paper_store.py",
+    "tests\test_paper_pipeline.py",
+    "tests\test_paper_report.py",
+    "tests\test_paper_cli.py",
+    "tests\__init__.py",
+    "tests\paper_helpers.py",
     "scripts\package_release.ps1",
     "scripts\run_parameter_test.ps1",
     "scripts\run_execution_test.ps1",
     "scripts\run_data_health.ps1",
     "scripts\run_account.ps1",
     "scripts\run_strategy_compare.ps1",
+    "scripts\run_paper_trading.ps1",
     "run_cost_stress.cmd",
     "run_parameter_test.cmd",
     "run_execution_test.cmd",
     "run_data_health.cmd",
     "run_account.cmd",
     "run_strategy_compare.cmd",
+    "run_paper_trading.cmd",
     "data\.gitkeep",
     "outputs\.gitkeep"
 )

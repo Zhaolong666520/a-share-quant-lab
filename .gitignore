@@ -15,5 +15,6 @@ outputs/*.png
 outputs/*.html
 outputs/*.json
 outputs/*.csv
+outputs/*.zip
 !data/.gitkeep
 !outputs/.gitkeep
