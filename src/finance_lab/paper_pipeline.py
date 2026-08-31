@@ -15,12 +15,26 @@ from finance_lab.data_manifest import (
     generate_dataset_manifest,
     read_update_summary,
 )
-from finance_lab.paper_models import PaperDataContext
+from finance_lab.ledger import LedgerConfig
+from finance_lab.paper_engine import advance_one_bar, initialize_account
+from finance_lab.paper_lock import paper_run_lock
+from finance_lab.paper_models import (
+    PaperDataContext,
+    PaperOperationResult,
+    make_default_accounts,
+)
+from finance_lab.paper_store import PaperStore
 from finance_lab.validation import DataValidationError, assert_valid_daily_prices
 
 
 class PaperDataGateError(RuntimeError):
     """Raised when local market-data lineage is unsafe for paper processing."""
+
+
+class PaperPortfolioNotFound(RuntimeError):
+    """Raised when a requested local paper portfolio has not been initialized."""
+
+    exit_code = 4
 
 
 @dataclass(frozen=True)
@@ -107,6 +121,125 @@ def load_paper_market_snapshot(
     )
 
 
+def paper_init_portfolio(
+    portfolio_id: str = "default",
+    ledger_config: LedgerConfig | None = None,
+    as_of_date: date | None = None,
+    stale_after_business_days: int = 3,
+    root: Path | None = None,
+) -> PaperOperationResult:
+    """Create the fixed account pair at the latest validated local market bar."""
+    paths = _project_paths(root)
+    effective_as_of_date = as_of_date or date.today()
+    with paper_run_lock(paths.data / "paper_trading.lock"):
+        snapshot = load_paper_market_snapshot(
+            paths,
+            effective_as_of_date,
+            stale_after_business_days,
+        )
+        accounts = make_default_accounts(
+            portfolio_id,
+            snapshot.data_context.data_end_date,
+            ledger_config or LedgerConfig(),
+        )
+        steps = tuple(initialize_account(account, snapshot.prices) for account in accounts)
+        with PaperStore(paths.database) as store:
+            store.ensure_schema()
+            states = store.initialize_portfolio(
+                accounts,
+                steps,
+                snapshot.data_context,
+                batch_id=_batch_id("init", portfolio_id, snapshot.data_context.data_end_date),
+            )
+    return PaperOperationResult(
+        status="initialized",
+        portfolio_id=portfolio_id,
+        processed_dates=(snapshot.data_context.data_end_date,),
+        states=states,
+        data_context=snapshot.data_context,
+    )
+
+
+def paper_run_portfolio(
+    portfolio_id: str = "default",
+    as_of_date: date | None = None,
+    stale_after_business_days: int = 3,
+    root: Path | None = None,
+) -> PaperOperationResult:
+    """Replay every unseen validated bar in one atomic two-account batch per date."""
+    paths = _project_paths(root)
+    effective_as_of_date = as_of_date or date.today()
+    with paper_run_lock(paths.data / "paper_trading.lock"):
+        snapshot = load_paper_market_snapshot(
+            paths,
+            effective_as_of_date,
+            stale_after_business_days,
+        )
+        with PaperStore(paths.database) as store:
+            store.ensure_schema()
+            if not store.portfolio_exists(portfolio_id):
+                raise PaperPortfolioNotFound(f"账户组 {portfolio_id} 不存在，请先运行 paper-init")
+            states = store.audit_portfolio(portfolio_id)
+            accounts = store.load_accounts(portfolio_id)
+            if len(accounts) != 2 or len(states) != len(accounts):
+                raise RuntimeError("模拟账户组必须包含两个经过审计的账户")
+            last_dates = {state.last_trade_date for state in states}
+            if len(last_dates) != 1:
+                raise RuntimeError("两个模拟账户的最后处理日期不一致，拒绝继续")
+            last_trade_date = next(iter(last_dates))
+            prices = snapshot.prices.copy()
+            prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="raise")
+            unseen_dates = tuple(
+                pd.Timestamp(value).date()
+                for value in prices.loc[
+                    prices["trade_date"].dt.date > last_trade_date, "trade_date"
+                ]
+            )
+            processed_dates: list[date] = []
+            current_states = states
+            for trade_date in unseen_dates:
+                history = prices.loc[prices["trade_date"].dt.date <= trade_date].copy()
+                steps = tuple(
+                    advance_one_bar(account, state, history)
+                    for account, state in zip(accounts, current_states, strict=True)
+                )
+                current_states = store.commit_batch(
+                    accounts,
+                    steps,
+                    snapshot.data_context,
+                    batch_id=_batch_id("run", portfolio_id, trade_date),
+                )
+                processed_dates.append(trade_date)
+    return PaperOperationResult(
+        status="processed" if processed_dates else "no-op",
+        portfolio_id=portfolio_id,
+        processed_dates=tuple(processed_dates),
+        states=current_states,
+        data_context=snapshot.data_context,
+    )
+
+
+def paper_status_portfolio(
+    portfolio_id: str = "default",
+    root: Path | None = None,
+) -> PaperOperationResult:
+    """Audit current account state without taking the write lock or mutating DuckDB."""
+    paths = _project_paths(root)
+    if not paths.database.exists():
+        raise PaperPortfolioNotFound(f"账户组 {portfolio_id} 不存在，请先运行 paper-init")
+    with PaperStore(paths.database, read_only=True) as store:
+        if not store.portfolio_exists(portfolio_id):
+            raise PaperPortfolioNotFound(f"账户组 {portfolio_id} 不存在，请先运行 paper-init")
+        states = store.audit_portfolio(portfolio_id)
+    return PaperOperationResult(
+        status="status",
+        portfolio_id=portfolio_id,
+        processed_dates=(),
+        states=states,
+        data_context=None,
+    )
+
+
 def _validate_manifest_item(item: DatasetFileManifest) -> None:
     if item.error_codes:
         raise PaperDataGateError(f"sh.510300 数据健康检查失败：{', '.join(item.error_codes)}")
@@ -132,3 +265,13 @@ def _validated_curated_path(paths: ProjectPaths, relative_path: str) -> Path:
     if not resolved.is_file():
         raise PaperDataGateError("更新摘要指向的整理数据文件不存在")
     return resolved
+
+
+def _project_paths(root: Path | None) -> ProjectPaths:
+    from finance_lab.config import get_paths
+
+    return get_paths(root)
+
+
+def _batch_id(operation: str, portfolio_id: str, trade_date: date) -> str:
+    return f"paper-{operation}-{portfolio_id}-{trade_date.isoformat()}"

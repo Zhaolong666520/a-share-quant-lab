@@ -14,6 +14,7 @@ from typing import Self, TypedDict, cast
 
 import duckdb
 
+from finance_lab.ledger import LedgerConfig, validate_ledger_config
 from finance_lab.paper_models import (
     EngineStep,
     PaperAccount,
@@ -21,7 +22,9 @@ from finance_lab.paper_models import (
     PaperDataContext,
     PaperEventDraft,
     PaperState,
+    PaperStrategyName,
     PendingOrder,
+    StrategySpec,
 )
 
 
@@ -470,6 +473,29 @@ class PaperStore:
             [portfolio_id],
         ).fetchall()
         return tuple(_state_from_row(row) for row in rows)
+
+    def load_accounts(self, portfolio_id: str) -> tuple[PaperAccount, ...]:
+        """Restore the immutable account definitions after their audit succeeds."""
+        rows = self._require_connection().execute(
+            """
+            SELECT
+                account_id, portfolio_id, symbol, instrument_kind, strategy,
+                strategy_parameters_json, initial_cash, lot_size, commission_bps,
+                minimum_commission, sell_tax_bps, slippage_bps, config_hash,
+                created_market_date, engine_version
+            FROM paper_accounts
+            WHERE portfolio_id = ?
+            ORDER BY
+                CASE strategy
+                    WHEN 'sma' THEN 1
+                    WHEN 'momentum' THEN 2
+                    ELSE 3
+                END,
+                account_id
+            """,
+            [portfolio_id],
+        ).fetchall()
+        return tuple(_account_from_row(row) for row in rows)
 
     def rebuild_state(self, account_id: str) -> PaperState:
         """Reconstruct one account solely from its immutable event history."""
@@ -1016,6 +1042,64 @@ def _state_from_row(row: tuple[object, ...]) -> PaperState:
     )
 
 
+def _account_from_row(row: tuple[object, ...]) -> PaperAccount:
+    (
+        account_id,
+        portfolio_id,
+        symbol,
+        instrument_kind,
+        strategy_name,
+        strategy_parameters_json,
+        initial_cash,
+        lot_size,
+        commission_bps,
+        minimum_commission,
+        sell_tax_bps,
+        slippage_bps,
+        config_hash,
+        created_market_date,
+        engine_version,
+    ) = row
+    strategy = _required_string({"strategy": strategy_name}, "strategy", "账户配置")
+    if strategy not in {"sma", "momentum"}:
+        raise PaperAuditError("账户配置中的策略无效")
+    parameters = _load_canonical_object(str(strategy_parameters_json), "账户策略参数")
+    if parameters.get("name") != strategy:
+        raise PaperAuditError("账户策略参数与策略名称不一致")
+    strategy_spec = StrategySpec(
+        name=cast(PaperStrategyName, strategy),
+        short_window=_optional_int(parameters.get("short_window"), "短期均线窗口"),
+        long_window=_optional_int(parameters.get("long_window"), "长期均线窗口"),
+        momentum_lookback=_optional_int(
+            parameters.get("momentum_lookback"), "动量回看窗口"
+        ),
+    )
+    ledger_config = LedgerConfig(
+        initial_cash=_as_float(initial_cash, "账户初始现金"),
+        lot_size=_as_int(lot_size, "账户每手数量"),
+        commission_bps=_as_float(commission_bps, "账户佣金"),
+        minimum_commission=_as_float(minimum_commission, "账户最低佣金"),
+        sell_tax_bps=_as_float(sell_tax_bps, "账户卖出税费"),
+        slippage_bps=_as_float(slippage_bps, "账户滑点"),
+    )
+    validate_ledger_config(ledger_config)
+    return PaperAccount(
+        account_id=_required_string({"account_id": account_id}, "account_id", "账户配置"),
+        portfolio_id=_required_string({"portfolio_id": portfolio_id}, "portfolio_id", "账户配置"),
+        symbol=_required_string({"symbol": symbol}, "symbol", "账户配置"),
+        instrument_kind=_required_string(
+            {"instrument_kind": instrument_kind}, "instrument_kind", "账户配置"
+        ),
+        strategy=strategy_spec,
+        ledger_config=ledger_config,
+        created_market_date=_as_date(created_market_date),
+        engine_version=_required_string(
+            {"engine_version": engine_version}, "engine_version", "账户配置"
+        ),
+        config_hash=_required_string({"config_hash": config_hash}, "config_hash", "账户配置"),
+    )
+
+
 def _stored_event_body(
     account_id: str,
     sequence_no: int,
@@ -1108,6 +1192,10 @@ def _as_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise PaperAuditError(f"{label} 无效")
     return value
+
+
+def _optional_int(value: object, label: str) -> int | None:
+    return None if value is None else _as_int(value, label)
 
 
 def _as_date(value: object) -> date:

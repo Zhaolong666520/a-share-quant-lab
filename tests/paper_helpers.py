@@ -15,6 +15,7 @@ def make_paper_test_project(
     *,
     periods: int = 140,
     mixed_sources: bool = False,
+    rising_prices: bool = False,
 ) -> tuple[ProjectPaths, pd.DataFrame]:
     paths = get_paths(root)
     config_directory = paths.root / "config"
@@ -36,6 +37,16 @@ def make_paper_test_project(
     prices["symbol"] = "sh.510300"
     prices["source"] = "akshare"
     prices["volume_unit"] = "share"
+    if rising_prices:
+        close_values = pd.Series(
+            [100.0 + index for index in range(len(prices))],
+            index=prices.index,
+        )
+        prices["open"] = close_values
+        prices["close"] = close_values
+        prices["high"] = close_values * 1.01
+        prices["low"] = close_values * 0.99
+        prices["amount"] = prices["volume"] * close_values
     if mixed_sources:
         prices.loc[prices.index[::2], "source"] = "baostock"
     curated_path = save_curated(prices, paths)
