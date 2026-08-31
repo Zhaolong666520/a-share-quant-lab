@@ -146,7 +146,7 @@ def write_strategy_comparison_report(
         f"<code>{html.escape(str(result.data_volume_units))}</code>；文件健康状态："
         f"<code>{html.escape(result.data_health_status)}</code>；数据集健康状态："
         f"<code>{html.escape(result.manifest_health_status or '未知')}</code>；检查日："
-        f"<code>{result.manifest_as_of_date or '未知'}</code>；近似滞后工作日："
+        f"<code>{result.manifest_as_of_date or '未知'}</code>；滞后交易日："
         "<code>"
         f"{result.business_days_stale if result.business_days_stale is not None else '未知'}"
         "</code>；"

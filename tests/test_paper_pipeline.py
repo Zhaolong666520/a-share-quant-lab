@@ -104,6 +104,26 @@ def test_data_gate_rejects_curated_file_replaced_after_manifest(
     assert not paths.database.exists()
 
 
+def test_data_gate_blocks_calendar_snapshot_fallback_without_database_mutation(
+    tmp_path: Path,
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path)
+    prices["trade_date"] = pd.bdate_range(end="2026-12-31", periods=len(prices))
+    prices.to_parquet(paths.curated / "sh_510300.parquet", index=False)
+    as_of_date = date(2027, 1, 5)
+    write_update_summary(
+        paths,
+        end=as_of_date.isoformat(),
+        rows=len(prices),
+        curated_file="data/curated/sh_510300.parquet",
+    )
+
+    with pytest.raises(PaperDataGateError, match="calendar_snapshot_out_of_range"):
+        load_paper_market_snapshot(paths, as_of_date, stale_after_business_days=3)
+
+    assert not paths.database.exists()
+
+
 def _append_rising_bars(
     paths: ProjectPaths,
     prices: pd.DataFrame,

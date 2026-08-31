@@ -55,6 +55,11 @@ def write_account_ledger_report(
     config = result.config
     if result.data_health:
         health = result.data_health
+        stale_days = (
+            health.business_days_stale
+            if health.business_days_stale is not None
+            else "未知"
+        )
         health_details = html.escape(
             json.dumps(health.upstream_errors, ensure_ascii=False)
             if health.upstream_errors
@@ -63,7 +68,7 @@ def write_account_ledger_report(
         health_block = f"""<p class="warning"><strong>数据健康状态：</strong>
 清单 {html.escape(health.manifest_health_status)}；本文件 {html.escape(health.file_health_status)}；
 检查日 {health.as_of_date}；数据区间 {health.start_date or '未知'} 至 {health.end_date or '未知'}；
-近似滞后工作日 {health.business_days_stale if health.business_days_stale is not None else '未知'}；
+相对检查日滞后交易日 {stale_days}；
 来源 {html.escape(str(health.sources))}；提醒 {html.escape(str(health.warning_codes))}；
 当前标的上游错误 {health_details}。</p>"""
     else:

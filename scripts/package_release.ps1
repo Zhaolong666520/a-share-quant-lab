@@ -110,6 +110,7 @@ $RequiredArchivePaths = @(
     "src\finance_lab\execution_feasibility.py",
     "src\finance_lab\execution_feasibility_report.py",
     "src\finance_lab\data_manifest.py",
+    "src\finance_lab\trading_calendar.py",
     "src\finance_lab\ledger.py",
     "src\finance_lab\ledger_report.py",
     "src\finance_lab\strategy_comparison.py",
@@ -126,6 +127,7 @@ $RequiredArchivePaths = @(
     "tests\test_parameter_sensitivity.py",
     "tests\test_execution_feasibility.py",
     "tests\test_data_manifest.py",
+    "tests\test_trading_calendar.py",
     "tests\test_ledger.py",
     "tests\test_strategy_comparison.py",
     "tests\test_paper_models.py",
@@ -151,6 +153,7 @@ $RequiredArchivePaths = @(
     "run_account.cmd",
     "run_strategy_compare.cmd",
     "run_paper_trading.cmd",
+    "config\sse_trading_calendar.json",
     "data\.gitkeep",
     "outputs\.gitkeep"
 )
