@@ -9,7 +9,11 @@ import pytest
 import finance_lab.data_manifest as manifest_module
 from finance_lab.cli import build_parser
 from finance_lab.config import get_paths
-from finance_lab.data_manifest import generate_dataset_manifest, write_dataset_manifest_report
+from finance_lab.data_manifest import (
+    generate_dataset_manifest,
+    read_update_summary,
+    write_dataset_manifest_report,
+)
 from finance_lab.pipeline import data_health
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
@@ -69,6 +73,7 @@ def test_manifest_warns_about_staleness_mixed_sources_and_unadjusted_data(
     )
 
     item = manifest.files[0]
+    assert item.business_days_stale is not None
     assert item.business_days_stale > 2
     assert "stale_data" in item.warning_codes
     assert "mixed_sources" in item.warning_codes
@@ -118,6 +123,67 @@ def test_manifest_surfaces_latest_upstream_source_errors(tmp_path: Path) -> None
         "demo.000300": {"akshare": "temporary upstream failure"}
     }
     assert manifest.health_status == "warning"
+
+
+def test_read_update_summary_preserves_successful_fallback_and_source_error(
+    tmp_path: Path,
+) -> None:
+    paths = get_paths(tmp_path)
+    (paths.outputs / "update_summary.json").write_text(
+        json.dumps(
+            {
+                "end": "2026-08-21",
+                "records": [
+                    {
+                        "symbol": "sh.510300",
+                        "rows": 3,
+                        "curated_file": "data/curated/sh_510300.parquet",
+                        "source_errors": {"akshare": "temporary upstream failure"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = read_update_summary(paths)
+
+    assert summary.parse_error is None
+    assert summary.end == "2026-08-21"
+    assert summary.records[0].symbol == "sh.510300"
+    assert summary.records[0].rows == 3
+    assert summary.records[0].curated_file == "data/curated/sh_510300.parquet"
+    assert summary.records[0].source_errors == {"akshare": "temporary upstream failure"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{",
+        "[]",
+        json.dumps({"records": {}}),
+        json.dumps({"records": [{"symbol": "sh.510300", "rows": 1, "source_errors": []}]}),
+        json.dumps({"records": [{"rows": 1}]}),
+    ],
+)
+def test_read_update_summary_degrades_malformed_content_without_crashing(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    paths = get_paths(tmp_path)
+    (paths.outputs / "update_summary.json").write_text(payload, encoding="utf-8")
+
+    summary = read_update_summary(paths)
+
+    assert summary.records == ()
+    assert summary.parse_error is not None
+
+
+def test_read_update_summary_handles_missing_file_explicitly(tmp_path: Path) -> None:
+    summary = read_update_summary(get_paths(tmp_path))
+
+    assert summary.end is None
+    assert summary.records == ()
 
 
 def test_manifest_degrades_malformed_update_summary_to_warning(tmp_path: Path) -> None:

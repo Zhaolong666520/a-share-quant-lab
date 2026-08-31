@@ -66,6 +66,21 @@ class DatasetManifest:
         }
 
 
+@dataclass(frozen=True)
+class UpdateRecord:
+    symbol: str
+    rows: int
+    curated_file: str | None
+    source_errors: dict[str, str]
+
+
+@dataclass(frozen=True)
+class UpdateSummary:
+    end: str | None
+    records: tuple[UpdateRecord, ...]
+    parse_error: str | None
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -86,10 +101,10 @@ def _business_days_after(last_date: date, as_of_date: date) -> int:
     return count
 
 
-def _load_upstream_status(paths: ProjectPaths) -> tuple[dict[str, dict[str, str]], str | None]:
+def read_update_summary(paths: ProjectPaths) -> UpdateSummary:
     summary_path = paths.outputs / "update_summary.json"
     if not summary_path.exists():
-        return {}, None
+        return UpdateSummary(end=None, records=(), parse_error=None)
     try:
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -99,21 +114,55 @@ def _load_upstream_status(paths: ProjectPaths) -> tuple[dict[str, dict[str, str]
             isinstance(record, dict) for record in records
         ):
             raise TypeError("update_summary.records 必须是对象数组")
+        parsed_records: list[UpdateRecord] = []
         for record in records:
-            if "source_errors" in record and not isinstance(record["source_errors"], dict):
+            symbol = record.get("symbol")
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise TypeError("每个 update_summary 记录都必须有非空 symbol")
+            rows = record.get("rows", 0)
+            if type(rows) is not int or rows < 0:
+                raise TypeError("update_summary.rows 必须是大于等于0的整数")
+            curated_file = record.get("curated_file")
+            if curated_file is not None and not isinstance(curated_file, str):
+                raise TypeError("curated_file 必须是字符串或 null")
+            source_errors_raw = record.get("source_errors", {})
+            if not isinstance(source_errors_raw, dict):
                 raise TypeError("source_errors 必须是对象")
-        errors = {
-            str(record["symbol"]): {
-                str(source): str(message)
-                for source, message in dict(record.get("source_errors", {})).items()
-            }
-            for record in records
-            if record.get("source_errors")
-        }
+            if not all(
+                isinstance(source, str) and isinstance(message, str)
+                for source, message in source_errors_raw.items()
+            ):
+                raise TypeError("source_errors 的键和值必须是字符串")
+            parsed_records.append(
+                UpdateRecord(
+                    symbol=symbol.strip(),
+                    rows=rows,
+                    curated_file=curated_file,
+                    source_errors=dict(sorted(source_errors_raw.items())),
+                )
+            )
         end = payload.get("end")
-        return errors, str(end) if end is not None else None
+        if end is not None and not isinstance(end, str):
+            raise TypeError("update_summary.end 必须是字符串或 null")
+        return UpdateSummary(
+            end=end,
+            records=tuple(parsed_records),
+            parse_error=None,
+        )
     except (json.JSONDecodeError, OSError, TypeError, KeyError, ValueError) as exc:
-        return {"__update_summary__": {"parse": str(exc)}}, None
+        return UpdateSummary(end=None, records=(), parse_error=str(exc))
+
+
+def _load_upstream_status(paths: ProjectPaths) -> tuple[dict[str, dict[str, str]], str | None]:
+    summary = read_update_summary(paths)
+    if summary.parse_error is not None:
+        return {"__update_summary__": {"parse": summary.parse_error}}, None
+    errors = {
+        record.symbol: record.source_errors
+        for record in summary.records
+        if record.source_errors
+    }
+    return errors, summary.end
 
 
 def _string_values(frame: pd.DataFrame, column: str) -> tuple[str, ...]:
