@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from finance_lab.paper_models import (
     PaperOperationResult,
     make_default_accounts,
 )
+from finance_lab.paper_report import write_paper_report
 from finance_lab.paper_store import PaperStore
 from finance_lab.validation import DataValidationError, assert_valid_daily_prices
 
@@ -151,13 +152,14 @@ def paper_init_portfolio(
                 snapshot.data_context,
                 batch_id=_batch_id("init", portfolio_id, snapshot.data_context.data_end_date),
             )
-    return PaperOperationResult(
-        status="initialized",
-        portfolio_id=portfolio_id,
-        processed_dates=(snapshot.data_context.data_end_date,),
-        states=states,
-        data_context=snapshot.data_context,
-    )
+        operation = PaperOperationResult(
+            status="initialized",
+            portfolio_id=portfolio_id,
+            processed_dates=(snapshot.data_context.data_end_date,),
+            states=states,
+            data_context=snapshot.data_context,
+        )
+        return _with_report(operation, paths)
 
 
 def paper_run_portfolio(
@@ -210,13 +212,14 @@ def paper_run_portfolio(
                     batch_id=_batch_id("run", portfolio_id, trade_date),
                 )
                 processed_dates.append(trade_date)
-    return PaperOperationResult(
-        status="processed" if processed_dates else "no-op",
-        portfolio_id=portfolio_id,
-        processed_dates=tuple(processed_dates),
-        states=current_states,
-        data_context=snapshot.data_context,
-    )
+        operation = PaperOperationResult(
+            status="processed" if processed_dates else "no-op",
+            portfolio_id=portfolio_id,
+            processed_dates=tuple(processed_dates),
+            states=current_states,
+            data_context=snapshot.data_context,
+        )
+        return _with_report(operation, paths)
 
 
 def paper_status_portfolio(
@@ -231,13 +234,14 @@ def paper_status_portfolio(
         if not store.portfolio_exists(portfolio_id):
             raise PaperPortfolioNotFound(f"账户组 {portfolio_id} 不存在，请先运行 paper-init")
         states = store.audit_portfolio(portfolio_id)
-    return PaperOperationResult(
+    operation = PaperOperationResult(
         status="status",
         portfolio_id=portfolio_id,
         processed_dates=(),
         states=states,
         data_context=None,
     )
+    return _with_report(operation, paths)
 
 
 def _validate_manifest_item(item: DatasetFileManifest) -> None:
@@ -275,3 +279,8 @@ def _project_paths(root: Path | None) -> ProjectPaths:
 
 def _batch_id(operation: str, portfolio_id: str, trade_date: date) -> str:
     return f"paper-{operation}-{portfolio_id}-{trade_date.isoformat()}"
+
+
+def _with_report(operation: PaperOperationResult, paths: ProjectPaths) -> PaperOperationResult:
+    report_paths = write_paper_report(operation, paths)
+    return replace(operation, report_path=report_paths.latest_html)

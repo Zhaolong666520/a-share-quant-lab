@@ -144,6 +144,8 @@ def test_paper_init_creates_two_forward_only_accounts(tmp_path: Path) -> None:
     assert all(state.last_trade_date == as_of_date for state in result.states)
     assert all(state.shares == 0 for state in result.states)
     assert all(state.pending_order is not None for state in result.states)
+    assert result.report_path is not None
+    assert result.report_path.exists()
     with duckdb.connect(str(paths.database), read_only=True) as connection:
         filled_orders = connection.execute(
             "SELECT COUNT(*) FROM paper_events WHERE event_type = 'ORDER_FILLED'"
@@ -201,3 +203,22 @@ def test_paper_status_is_read_only_and_missing_portfolio_is_explicit(tmp_path: P
     assert status.status == "status"
     assert status.states == initialized.states
     assert paths.database.stat().st_mtime_ns == before_mtime
+
+
+def test_report_failure_does_not_rollback_committed_paper_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    as_of_date = prices["trade_date"].max().date()
+
+    def fail_report(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected report failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(paper_pipeline_module, "write_paper_report", fail_report)
+        with pytest.raises(RuntimeError, match="injected report failure"):
+            paper_init_portfolio(root=tmp_path, as_of_date=as_of_date)
+
+    status = paper_status_portfolio(root=tmp_path)
+    assert status.status == "status"
