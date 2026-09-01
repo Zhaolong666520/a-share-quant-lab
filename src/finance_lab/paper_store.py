@@ -11,11 +11,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self, TypedDict, cast
+from urllib.parse import urlparse
 
 import duckdb
 
 from finance_lab.ledger import LedgerConfig, validate_ledger_config
 from finance_lab.paper_models import (
+    CashDistributionEntitlement,
     EngineStep,
     PaperAccount,
     PaperAction,
@@ -89,7 +91,7 @@ class PaperStore:
             self._connection = None
 
     def ensure_schema(self) -> None:
-        """Create schema version 1 without touching existing market-data tables."""
+        """Create or migrate the paper ledger without touching market-data tables."""
         if self.read_only:
             raise RuntimeError("只读账本不能创建或升级表结构")
         connection = self._require_connection()
@@ -189,15 +191,36 @@ class PaperStore:
                 drawdown DOUBLE NOT NULL,
                 last_target_position INTEGER,
                 pending_order_json VARCHAR,
+                distribution_entitlements_json VARCHAR NOT NULL DEFAULT '[]',
                 last_event_hash VARCHAR NOT NULL,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        state_columns = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'main' AND table_name = 'paper_state'"
+            ).fetchall()
+        }
+        if "distribution_entitlements_json" not in state_columns:
+            connection.execute(
+                "ALTER TABLE paper_state ADD COLUMN "
+                "distribution_entitlements_json VARCHAR DEFAULT '[]'"
+            )
+            connection.execute(
+                "UPDATE paper_state SET distribution_entitlements_json = '[]' "
+                "WHERE distribution_entitlements_json IS NULL"
+            )
+            connection.execute(
+                "ALTER TABLE paper_state ALTER COLUMN "
+                "distribution_entitlements_json SET NOT NULL"
+            )
         connection.execute(
             "INSERT INTO paper_schema_metadata (schema_version) VALUES (?) "
             "ON CONFLICT (schema_version) DO NOTHING",
-            [1],
+            [2],
         )
 
     def portfolio_exists(self, portfolio_id: str) -> bool:
@@ -369,8 +392,8 @@ class PaperStore:
             INSERT INTO paper_state (
                 account_id, last_trade_date, cash, shares, last_close, equity,
                 equity_peak, drawdown, last_target_position, pending_order_json,
-                last_event_hash, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                distribution_entitlements_json, last_event_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (account_id) DO UPDATE SET
                 last_trade_date = excluded.last_trade_date,
                 cash = excluded.cash,
@@ -381,6 +404,7 @@ class PaperStore:
                 drawdown = excluded.drawdown,
                 last_target_position = excluded.last_target_position,
                 pending_order_json = excluded.pending_order_json,
+                distribution_entitlements_json = excluded.distribution_entitlements_json,
                 last_event_hash = excluded.last_event_hash,
                 updated_at = excluded.updated_at
             """,
@@ -458,7 +482,8 @@ class PaperStore:
             SELECT
                 state.account_id, state.last_trade_date, state.cash, state.shares,
                 state.last_close, state.equity, state.equity_peak, state.drawdown,
-                state.last_target_position, state.pending_order_json, state.last_event_hash
+                state.last_target_position, state.pending_order_json,
+                state.distribution_entitlements_json, state.last_event_hash
             FROM paper_state AS state
             INNER JOIN paper_accounts AS account USING (account_id)
             WHERE account.portfolio_id = ?
@@ -473,6 +498,43 @@ class PaperStore:
             [portfolio_id],
         ).fetchall()
         return tuple(_state_from_row(row) for row in rows)
+
+    def observed_cash_distribution_ids(
+        self,
+        portfolio_id: str,
+    ) -> dict[str, frozenset[str]]:
+        """Return distribution actions explicitly observed by each account."""
+        account_rows = self._require_connection().execute(
+            "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
+            [portfolio_id],
+        ).fetchall()
+        observed: dict[str, set[str]] = {
+            str(account_id): set() for (account_id,) in account_rows
+        }
+        rows = self._require_connection().execute(
+            """
+            SELECT event.account_id, event.payload_json
+            FROM paper_events AS event
+            INNER JOIN paper_accounts AS account USING (account_id)
+            WHERE account.portfolio_id = ?
+              AND event.event_type IN (
+                  'CASH_DISTRIBUTION_ENTITLED',
+                  'CASH_DISTRIBUTION_NOT_ENTITLED'
+              )
+            ORDER BY event.trade_date, event.account_id, event.sequence_no
+            """,
+            [portfolio_id],
+        ).fetchall()
+        for account_id_raw, payload_json in rows:
+            account_id = str(account_id_raw)
+            payload = _load_canonical_object(str(payload_json), "分红观察事件 payload")
+            observed[account_id].add(
+                _required_string(payload, "action_id", "分红观察事件")
+            )
+        return {
+            account_id: frozenset(action_ids)
+            for account_id, action_ids in observed.items()
+        }
 
     def load_accounts(self, portfolio_id: str) -> tuple[PaperAccount, ...]:
         """Restore the immutable account definitions after their audit succeeds."""
@@ -553,7 +615,10 @@ class PaperStore:
                     raise PaperAuditError(f"运行 {run_id} 的日期与事件不一致")
                 if int(event_count) != event_counts[run_id]:
                     raise PaperAuditError(f"运行 {run_id} 的事件数量不一致")
-                if str(state_hash) != _state_hash(rebuilt_at_run):
+                valid_state_hashes = {_state_hash(rebuilt_at_run)}
+                if not rebuilt_at_run.distribution_entitlements:
+                    valid_state_hashes.add(_legacy_state_hash_v1(rebuilt_at_run))
+                if str(state_hash) not in valid_state_hashes:
                     raise PaperAuditError(f"运行 {run_id} 的状态哈希不一致")
                 _assert_canonical_json(str(data_health_json), "运行数据健康上下文")
             rebuilt_states.append(rebuilt)
@@ -720,6 +785,8 @@ class PaperStore:
         last_trade_date: date | None = None
         last_target_position: int | None = None
         pending_order: PendingOrder | None = None
+        distribution_entitlements: dict[str, CashDistributionEntitlement] = {}
+        seen_distribution_ids: set[str] = set()
         first_event = True
 
         for row in rows:
@@ -799,6 +866,8 @@ class PaperStore:
                 raise PaperAuditError(f"模拟账户 {account_id} 的事件哈希链不一致")
             previous_hash = str(stored_event_hash)
 
+            prior_cash = cash
+            prior_shares = shares
             cash = float(cash_after)
             shares = int(shares_after)
             close = float(close_price)
@@ -832,6 +901,66 @@ class PaperStore:
                 if pending_order is None or str(order_id_raw) != pending_order.order_id:
                     raise PaperAuditError(f"模拟账户 {account_id} 的订单事件无法匹配待成交订单")
                 pending_order = None
+            elif str(event_type) == "CASH_DISTRIBUTION_NOT_ENTITLED":
+                (
+                    action_id,
+                    record_date,
+                    _payment_date,
+                    _cash_per_share,
+                    _source_url,
+                ) = _distribution_event_fields(payload, "无分红权益事件")
+                if action_id in seen_distribution_ids:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红观察事件重复")
+                if record_date != last_trade_date:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红登记日期不一致")
+                if (
+                    int(quantity) != 0
+                    or not math.isclose(float(notional), 0.0, abs_tol=1e-12)
+                    or prior_shares != 0
+                    or shares != 0
+                    or not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8)
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的无分红权益事件无效")
+                seen_distribution_ids.add(action_id)
+            elif str(event_type) == "CASH_DISTRIBUTION_ENTITLED":
+                entitlement = _entitlement_from_event(
+                    payload,
+                    int(quantity),
+                    float(notional),
+                    "分红权益事件",
+                )
+                if entitlement.action_id in seen_distribution_ids:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红权益事件重复")
+                if entitlement.record_date != last_trade_date:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红登记日期不一致")
+                if int(quantity) != prior_shares or shares != prior_shares:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红登记份额不一致")
+                if not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红登记错误改变现金")
+                seen_distribution_ids.add(entitlement.action_id)
+                distribution_entitlements[entitlement.action_id] = entitlement
+            elif str(event_type) == "CASH_DISTRIBUTION_PAID":
+                paid = _entitlement_from_event(
+                    payload,
+                    int(quantity),
+                    float(notional),
+                    "分红到账事件",
+                )
+                matched_entitlement = distribution_entitlements.get(paid.action_id)
+                if matched_entitlement is None or paid != matched_entitlement:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红到账无法匹配权益")
+                if last_trade_date < matched_entitlement.payment_date:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红到账日期早于支付日")
+                if shares != prior_shares:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红到账错误改变份额")
+                if not math.isclose(
+                    cash,
+                    prior_cash + matched_entitlement.cash_amount,
+                    rel_tol=0.0,
+                    abs_tol=1e-8,
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的分红到账现金不一致")
+                del distribution_entitlements[paid.action_id]
 
             run_state = PaperState(
                 account_id=account_id,
@@ -845,6 +974,12 @@ class PaperStore:
                 last_target_position=last_target_position,
                 pending_order=pending_order,
                 last_event_hash=previous_hash,
+                distribution_entitlements=tuple(
+                    sorted(
+                        distribution_entitlements.values(),
+                        key=lambda item: (item.payment_date, item.action_id),
+                    )
+                ),
             )
 
         if current_run_id is None or run_state is None:
@@ -954,6 +1089,30 @@ def _pending_order_payload(state: PaperState) -> dict[str, object] | None:
     }
 
 
+def _entitlement_payload(
+    entitlement: CashDistributionEntitlement,
+) -> dict[str, object]:
+    return {
+        "action_id": entitlement.action_id,
+        "record_date": entitlement.record_date.isoformat(),
+        "payment_date": entitlement.payment_date.isoformat(),
+        "cash_per_share": entitlement.cash_per_share,
+        "entitled_shares": entitlement.entitled_shares,
+        "cash_amount": entitlement.cash_amount,
+        "source_url": entitlement.source_url,
+    }
+
+
+def _distribution_entitlements_payload(state: PaperState) -> list[dict[str, object]]:
+    return [
+        _entitlement_payload(entitlement)
+        for entitlement in sorted(
+            state.distribution_entitlements,
+            key=lambda item: (item.payment_date, item.action_id),
+        )
+    ]
+
+
 def _state_payload(state: PaperState) -> dict[str, object]:
     return {
         "account_id": state.account_id,
@@ -966,12 +1125,19 @@ def _state_payload(state: PaperState) -> dict[str, object]:
         "drawdown": state.drawdown,
         "last_target_position": state.last_target_position,
         "pending_order": _pending_order_payload(state),
+        "distribution_entitlements": _distribution_entitlements_payload(state),
         "last_event_hash": state.last_event_hash,
     }
 
 
 def _state_hash(state: PaperState) -> str:
     return hashlib.sha256(_canonical_json(_state_payload(state)).encode("utf-8")).hexdigest()
+
+
+def _legacy_state_hash_v1(state: PaperState) -> str:
+    payload = _state_payload(state)
+    del payload["distribution_entitlements"]
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _state_values(state: PaperState, updated_at: datetime) -> list[object]:
@@ -987,6 +1153,7 @@ def _state_values(state: PaperState, updated_at: datetime) -> list[object]:
         state.drawdown,
         state.last_target_position,
         _canonical_json(pending_order) if pending_order is not None else None,
+        _canonical_json(_distribution_entitlements_payload(state)),
         state.last_event_hash,
         updated_at,
     ]
@@ -1004,6 +1171,7 @@ def _state_from_row(row: tuple[object, ...]) -> PaperState:
         drawdown,
         last_target_position,
         pending_order_json,
+        distribution_entitlements_json,
         last_event_hash,
     ) = row
     pending_payload = (
@@ -1027,6 +1195,9 @@ def _state_from_row(row: tuple[object, ...]) -> PaperState:
     )
     if target_position not in {None, 0, 1}:
         raise PaperAuditError("状态缓存中的目标仓位无效")
+    distribution_entitlements = _distribution_entitlements_from_json(
+        str(distribution_entitlements_json)
+    )
     return PaperState(
         account_id=str(account_id),
         last_trade_date=_as_date(last_trade_date),
@@ -1039,6 +1210,7 @@ def _state_from_row(row: tuple[object, ...]) -> PaperState:
         last_target_position=target_position,
         pending_order=pending_order,
         last_event_hash=str(last_event_hash),
+        distribution_entitlements=distribution_entitlements,
     )
 
 
@@ -1158,6 +1330,113 @@ def _load_canonical_object(serialized: str, label: str) -> dict[str, object]:
     if _canonical_json(payload) != serialized:
         raise PaperAuditError(f"{label} 不是规范化 JSON")
     return payload
+
+
+def _load_canonical_array(serialized: str, label: str) -> list[object]:
+    try:
+        payload = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        raise PaperAuditError(f"{label} 不是有效 JSON") from exc
+    if not isinstance(payload, list):
+        raise PaperAuditError(f"{label} 必须是 JSON 数组")
+    if _canonical_json(payload) != serialized:
+        raise PaperAuditError(f"{label} 不是规范化 JSON")
+    return payload
+
+
+def _entitlement_from_payload(
+    payload: dict[str, object],
+    label: str,
+) -> CashDistributionEntitlement:
+    (
+        action_id,
+        record_date,
+        payment_date,
+        cash_per_share,
+        source_url,
+    ) = _distribution_event_fields(payload, label)
+    entitled_shares = _as_int(payload.get("entitled_shares"), f"{label}登记份额")
+    cash_amount = _as_float(payload.get("cash_amount"), f"{label}现金金额")
+    if (
+        entitled_shares <= 0
+        or not math.isfinite(cash_amount)
+        or cash_amount <= 0.0
+        or not math.isclose(
+            cash_amount,
+            entitled_shares * cash_per_share,
+            rel_tol=0.0,
+            abs_tol=1e-8,
+        )
+    ):
+        raise PaperAuditError(f"{label}的数值无效")
+    return CashDistributionEntitlement(
+        action_id=action_id,
+        record_date=record_date,
+        payment_date=payment_date,
+        cash_per_share=cash_per_share,
+        entitled_shares=entitled_shares,
+        cash_amount=cash_amount,
+        source_url=source_url,
+    )
+
+
+def _distribution_event_fields(
+    payload: dict[str, object],
+    label: str,
+) -> tuple[str, date, date, float, str]:
+    action_id = _required_string(payload, "action_id", label)
+    source_url = _required_string(payload, "source_url", label)
+    parsed_url = urlparse(source_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise PaperAuditError(f"{label} 的来源链接无效")
+    if "record_date" not in payload or "payment_date" not in payload:
+        raise PaperAuditError(f"{label} 缺少日期")
+    record_date = _as_date(payload["record_date"])
+    payment_date = _as_date(payload["payment_date"])
+    cash_per_share = _as_float(payload.get("cash_per_share"), f"{label}每份金额")
+    if (
+        record_date > payment_date
+        or not math.isfinite(cash_per_share)
+        or cash_per_share <= 0.0
+    ):
+        raise PaperAuditError(f"{label}的数值或日期无效")
+    return action_id, record_date, payment_date, cash_per_share, source_url
+
+
+def _entitlement_from_event(
+    payload: dict[str, object],
+    quantity: int,
+    notional: float,
+    label: str,
+) -> CashDistributionEntitlement:
+    event_payload = {
+        **payload,
+        "entitled_shares": quantity,
+        "cash_amount": notional,
+    }
+    return _entitlement_from_payload(event_payload, label)
+
+
+def _distribution_entitlements_from_json(
+    serialized: str,
+) -> tuple[CashDistributionEntitlement, ...]:
+    items = _load_canonical_array(serialized, "待到账分红权益")
+    entitlements: list[CashDistributionEntitlement] = []
+    action_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise PaperAuditError("待到账分红权益的条目必须是 JSON 对象")
+        entitlement = _entitlement_from_payload(item, "待到账分红权益")
+        if entitlement.action_id in action_ids:
+            raise PaperAuditError("待到账分红权益包含重复事件")
+        action_ids.add(entitlement.action_id)
+        entitlements.append(entitlement)
+    sorted_entitlements = tuple(
+        sorted(entitlements, key=lambda item: (item.payment_date, item.action_id))
+    )
+    if tuple(entitlements) != sorted_entitlements:
+        raise PaperAuditError("待到账分红权益未按支付日期排序")
+    return sorted_entitlements
 
 
 def _assert_canonical_json(serialized: str, label: str) -> None:

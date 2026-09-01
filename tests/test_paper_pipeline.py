@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -207,6 +208,82 @@ def test_paper_run_processes_each_unseen_bar_once_and_then_becomes_no_op(
     with duckdb.connect(str(paths.database), read_only=True) as connection:
         runs_after_retry = connection.execute("SELECT COUNT(*) FROM paper_runs").fetchone()
     assert runs_after_retry == runs_before_retry
+
+
+def test_paper_run_posts_validated_local_cash_distribution(tmp_path: Path) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    created_on = prices["trade_date"].max().date()
+    paper_init_portfolio(root=tmp_path, as_of_date=created_on)
+    updated, latest_date = _append_rising_bars(paths, prices, count=2)
+    record_date, payment_date = (
+        item.date() for item in updated["trade_date"].tail(2)
+    )
+    distribution_path = paths.raw / "cash_distributions" / "2026-test-distribution.csv"
+    distribution_path.parent.mkdir(parents=True)
+    distribution_path.write_text(
+        "symbol,record_date,ex_date,payment_date,cash_per_share,currency,"
+        "source_url,source_published_at,ingested_at\n"
+        f"sh.510300,{record_date},{record_date},{payment_date},0.5,CNY,"
+        "https://example.com/etf/2026,2026-01-01T09:00:00+08:00,"
+        "2026-01-02T09:00:00+08:00\n",
+        encoding="utf-8",
+    )
+
+    result = paper_run_portfolio(root=tmp_path, as_of_date=latest_date)
+
+    assert result.processed_dates == (record_date, payment_date)
+    assert all(state.distribution_entitlements == () for state in result.states)
+    with duckdb.connect(str(paths.database), read_only=True) as connection:
+        distribution_events = connection.execute(
+            "SELECT event_type, quantity, notional FROM paper_events "
+            "WHERE event_type LIKE 'CASH_DISTRIBUTION_%' "
+            "ORDER BY trade_date, account_id"
+        ).fetchall()
+    assert [row[0] for row in distribution_events] == [
+        "CASH_DISTRIBUTION_ENTITLED",
+        "CASH_DISTRIBUTION_ENTITLED",
+        "CASH_DISTRIBUTION_PAID",
+        "CASH_DISTRIBUTION_PAID",
+    ]
+    assert all(int(row[1]) > 0 and float(row[2]) > 0.0 for row in distribution_events)
+    report_payload = json.loads(
+        (paths.outputs / "default_paper_latest_report.json").read_text(encoding="utf-8")
+    )
+    assert report_payload["distribution_rows"] == 4
+    assert all(
+        account["metrics"]["distribution_cash_total"] > 0.0
+        for account in report_payload["accounts"]
+    )
+    assert any(
+        "CASH_DISTRIBUTION_PAID" in path.read_text(encoding="utf-8-sig")
+        for path in paths.outputs.glob("*_distributions.csv")
+    )
+
+
+def test_paper_run_rejects_distribution_snapshot_added_after_record_date(
+    tmp_path: Path,
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    created_on = prices["trade_date"].max().date()
+    paper_init_portfolio(root=tmp_path, as_of_date=created_on)
+    updated, record_date = _append_rising_bars(paths, prices, count=1)
+    paper_run_portfolio(root=tmp_path, as_of_date=record_date)
+    distribution_path = paths.raw / "cash_distributions" / "2026-late-distribution.csv"
+    distribution_path.parent.mkdir(parents=True)
+    distribution_path.write_text(
+        "symbol,record_date,ex_date,payment_date,cash_per_share,currency,"
+        "source_url,source_published_at,ingested_at\n"
+        f"sh.510300,{record_date},{record_date},{record_date},0.5,CNY,"
+        "https://example.com/etf/late,2026-01-01T09:00:00+08:00,"
+        "2026-01-02T09:00:00+08:00\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PaperDataGateError, match="迟到"):
+        paper_run_portfolio(
+            root=tmp_path,
+            as_of_date=updated["trade_date"].max().date(),
+        )
 
 
 def test_paper_status_is_read_only_and_missing_portfolio_is_explicit(tmp_path: Path) -> None:

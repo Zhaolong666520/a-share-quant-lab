@@ -116,6 +116,7 @@ $RequiredArchivePaths = @(
     "src\finance_lab\strategy_comparison.py",
     "src\finance_lab\strategy_comparison_report.py",
     "src\finance_lab\paper_models.py",
+    "src\finance_lab\cash_distributions.py",
     "src\finance_lab\paper_engine.py",
     "src\finance_lab\paper_lock.py",
     "src\finance_lab\paper_store.py",
@@ -131,6 +132,7 @@ $RequiredArchivePaths = @(
     "tests\test_ledger.py",
     "tests\test_strategy_comparison.py",
     "tests\test_paper_models.py",
+    "tests\test_cash_distributions.py",
     "tests\test_paper_engine.py",
     "tests\test_paper_lock.py",
     "tests\test_paper_store.py",
@@ -154,6 +156,7 @@ $RequiredArchivePaths = @(
     "run_strategy_compare.cmd",
     "run_paper_trading.cmd",
     "config\sse_trading_calendar.json",
+    "config\cash_distribution_template.csv",
     "data\.gitkeep",
     "outputs\.gitkeep"
 )

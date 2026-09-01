@@ -7,8 +7,10 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from finance_lab.cash_distributions import CashDistribution
 from finance_lab.ledger import affordable_shares, commission_for, validate_ledger_config
 from finance_lab.paper_models import (
+    CashDistributionEntitlement,
     EngineStep,
     PaperAccount,
     PaperAction,
@@ -121,6 +123,20 @@ def _order_id(account_id: str, signal_date: date, action: str) -> str:
     return "paper-" + hashlib.sha256(identity.encode("ascii")).hexdigest()[:24]
 
 
+def _cash_distribution_payload(distribution: CashDistribution) -> dict[str, object]:
+    return {
+        "action_id": distribution.action_id,
+        "record_date": distribution.record_date.isoformat(),
+        "ex_date": distribution.ex_date.isoformat(),
+        "payment_date": distribution.payment_date.isoformat(),
+        "cash_per_share": distribution.cash_per_share,
+        "currency": distribution.currency,
+        "source_url": distribution.source_url,
+        "source_published_at": distribution.source_published_at.isoformat(),
+        "ingested_at": distribution.ingested_at.isoformat(),
+    }
+
+
 def _state_after_valuation(
     account: PaperAccount,
     state: PaperState,
@@ -131,6 +147,7 @@ def _state_after_valuation(
     shares: int | None = None,
     pending_order: PendingOrder | None = None,
     last_target_position: int | None = None,
+    distribution_entitlements: tuple[CashDistributionEntitlement, ...] | None = None,
 ) -> PaperState:
     next_cash = state.cash if cash is None else cash
     next_shares = state.shares if shares is None else shares
@@ -157,6 +174,11 @@ def _state_after_valuation(
         last_target_position=last_target_position,
         pending_order=pending_order,
         last_event_hash=state.last_event_hash,
+        distribution_entitlements=(
+            state.distribution_entitlements
+            if distribution_entitlements is None
+            else distribution_entitlements
+        ),
     )
 
 
@@ -273,7 +295,13 @@ def initialize_account(account: PaperAccount, history: pd.DataFrame) -> EngineSt
     return EngineStep(state=final_state, events=(account_event, valuation_event, *signal_events))
 
 
-def advance_one_bar(account: PaperAccount, state: PaperState, history: pd.DataFrame) -> EngineStep:
+def advance_one_bar(
+    account: PaperAccount,
+    state: PaperState,
+    history: pd.DataFrame,
+    *,
+    cash_distributions: tuple[CashDistribution, ...] = (),
+) -> EngineStep:
     """Fill any prior order at the supplied bar open, then calculate its close signal."""
     validate_ledger_config(account.ledger_config)
     trade_date, raw_open, close = _current_bar(history)
@@ -410,11 +438,113 @@ def advance_one_bar(account: PaperAccount, state: PaperState, history: pd.DataFr
             last_target_position=state.last_target_position,
         )
 
-    valuation_event = _event("VALUATION", trade_date, state_after_order)
+    state_after_payment = state_after_order
+    due_entitlements = sorted(
+        (
+            entitlement
+            for entitlement in state_after_order.distribution_entitlements
+            if entitlement.payment_date <= trade_date
+        ),
+        key=lambda item: (item.payment_date, item.action_id),
+    )
+    for entitlement in due_entitlements:
+        remaining_entitlements = tuple(
+            item
+            for item in state_after_payment.distribution_entitlements
+            if item.action_id != entitlement.action_id
+        )
+        state_after_payment = _state_after_valuation(
+            account,
+            state_after_payment,
+            trade_date,
+            close,
+            cash=state_after_payment.cash + entitlement.cash_amount,
+            shares=state_after_payment.shares,
+            pending_order=state_after_payment.pending_order,
+            last_target_position=state_after_payment.last_target_position,
+            distribution_entitlements=remaining_entitlements,
+        )
+        events.append(
+            _event(
+                "CASH_DISTRIBUTION_PAID",
+                trade_date,
+                state_after_payment,
+                quantity=entitlement.entitled_shares,
+                notional=entitlement.cash_amount,
+                payload={
+                    "action_id": entitlement.action_id,
+                    "record_date": entitlement.record_date.isoformat(),
+                    "payment_date": entitlement.payment_date.isoformat(),
+                    "cash_per_share": entitlement.cash_per_share,
+                    "source_url": entitlement.source_url,
+                },
+            )
+        )
+
+    valuation_event = _event("VALUATION", trade_date, state_after_payment)
+    state_after_entitlement = state_after_payment
+    entitlement_events: list[PaperEventDraft] = []
+    for distribution in sorted(cash_distributions, key=lambda item: item.action_id):
+        if distribution.symbol != account.symbol:
+            raise ValueError("现金分红标的与账户不一致")
+        if distribution.record_date != trade_date:
+            continue
+        if state_after_payment.shares == 0:
+            entitlement_events.append(
+                _event(
+                    "CASH_DISTRIBUTION_NOT_ENTITLED",
+                    trade_date,
+                    state_after_entitlement,
+                    reason_code="NO_SHARES_ON_RECORD_DATE",
+                    payload=_cash_distribution_payload(distribution),
+                )
+            )
+            continue
+        cash_amount = state_after_payment.shares * distribution.cash_per_share
+        if not math.isfinite(cash_amount) or cash_amount <= 0.0:
+            raise ValueError("现金分红金额必须是有限正数")
+        entitlement = CashDistributionEntitlement(
+            action_id=distribution.action_id,
+            record_date=distribution.record_date,
+            payment_date=distribution.payment_date,
+            cash_per_share=distribution.cash_per_share,
+            entitled_shares=state_after_payment.shares,
+            cash_amount=cash_amount,
+            source_url=distribution.source_url,
+        )
+        state_after_entitlement = _state_after_valuation(
+            account,
+            state_after_entitlement,
+            trade_date,
+            close,
+            cash=state_after_entitlement.cash,
+            shares=state_after_entitlement.shares,
+            pending_order=state_after_entitlement.pending_order,
+            last_target_position=state_after_entitlement.last_target_position,
+            distribution_entitlements=tuple(
+                sorted(
+                    (*state_after_entitlement.distribution_entitlements, entitlement),
+                    key=lambda item: (item.payment_date, item.action_id),
+                )
+            ),
+        )
+        entitlement_events.append(
+            _event(
+                "CASH_DISTRIBUTION_ENTITLED",
+                trade_date,
+                state_after_entitlement,
+                quantity=entitlement.entitled_shares,
+                notional=entitlement.cash_amount,
+                payload=_cash_distribution_payload(distribution),
+            )
+        )
     final_state, signal_events = _signal_events(
         account,
-        state_after_order,
+        state_after_entitlement,
         _validated_history(history)["close"],
         trade_date,
     )
-    return EngineStep(state=final_state, events=(*events, valuation_event, *signal_events))
+    return EngineStep(
+        state=final_state,
+        events=(*events, valuation_event, *entitlement_events, *signal_events),
+    )

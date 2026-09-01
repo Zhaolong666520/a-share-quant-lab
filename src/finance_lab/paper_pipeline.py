@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from finance_lab.cash_distributions import (
+    CashDistribution,
+    load_cash_distribution_snapshots,
+)
 from finance_lab.config import ProjectPaths, load_instruments
 from finance_lab.data_manifest import (
     DatasetFileManifest,
@@ -19,8 +23,10 @@ from finance_lab.ledger import LedgerConfig
 from finance_lab.paper_engine import advance_one_bar, initialize_account
 from finance_lab.paper_lock import paper_run_lock
 from finance_lab.paper_models import (
+    PaperAccount,
     PaperDataContext,
     PaperOperationResult,
+    PaperState,
     make_default_accounts,
 )
 from finance_lab.paper_report import write_paper_report
@@ -177,6 +183,10 @@ def paper_run_portfolio(
             effective_as_of_date,
             stale_after_business_days,
         )
+        cash_distributions = load_cash_distribution_snapshots(
+            paths.raw / "cash_distributions",
+            symbol="sh.510300",
+        )
         with PaperStore(paths.database) as store:
             store.ensure_schema()
             if not store.portfolio_exists(portfolio_id):
@@ -191,6 +201,14 @@ def paper_run_portfolio(
             last_trade_date = next(iter(last_dates))
             prices = snapshot.prices.copy()
             prices["trade_date"] = pd.to_datetime(prices["trade_date"], errors="raise")
+            _validate_distribution_timing(
+                cash_distributions,
+                accounts,
+                states,
+                store.observed_cash_distribution_ids(portfolio_id),
+                frozenset(prices["trade_date"].dt.date),
+                snapshot.data_context.data_end_date,
+            )
             unseen_dates = tuple(
                 pd.Timestamp(value).date()
                 for value in prices.loc[
@@ -202,7 +220,12 @@ def paper_run_portfolio(
             for trade_date in unseen_dates:
                 history = prices.loc[prices["trade_date"].dt.date <= trade_date].copy()
                 steps = tuple(
-                    advance_one_bar(account, state, history)
+                    advance_one_bar(
+                        account,
+                        state,
+                        history,
+                        cash_distributions=cash_distributions,
+                    )
                     for account, state in zip(accounts, current_states, strict=True)
                 )
                 current_states = store.commit_batch(
@@ -255,6 +278,39 @@ def _validate_manifest_item(item: DatasetFileManifest) -> None:
         )
     if item.business_days_stale is None:
         raise PaperDataGateError("sh.510300 的数据陈旧状态未知")
+
+
+def _validate_distribution_timing(
+    cash_distributions: tuple[CashDistribution, ...],
+    accounts: tuple[PaperAccount, ...],
+    states: tuple[PaperState, ...],
+    observed_by_account: dict[str, frozenset[str]],
+    market_dates: frozenset[date],
+    data_end_date: date,
+) -> None:
+    for account, state in zip(accounts, states, strict=True):
+        account_id = account.account_id
+        created_market_date = account.created_market_date
+        last_trade_date = state.last_trade_date
+        observed = observed_by_account.get(account_id, frozenset())
+        for distribution in cash_distributions:
+            if distribution.record_date <= created_market_date:
+                continue
+            if (
+                distribution.record_date <= data_end_date
+                and distribution.record_date not in market_dates
+            ):
+                raise PaperDataGateError(
+                    f"现金分红 {distribution.action_id[:12]} 的登记日不在行情交易日中"
+                )
+            if (
+                distribution.record_date <= last_trade_date
+                and distribution.action_id not in observed
+            ):
+                raise PaperDataGateError(
+                    f"现金分红 {distribution.action_id[:12]} 快照迟到：登记日已经处理，"
+                    "拒绝静默漏记，请检查账本后重新初始化账户组"
+                )
 
 
 def _validated_curated_path(paths: ProjectPaths, relative_path: str) -> Path:

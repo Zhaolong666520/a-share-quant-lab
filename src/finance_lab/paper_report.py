@@ -26,6 +26,7 @@ class PaperReportPaths:
     archive_json: Path
     daily_csv: Path
     trades_csv: Path
+    distributions_csv: Path
     chart_png: Path
     latest_html: Path
     latest_json: Path
@@ -37,6 +38,7 @@ class PaperReportPaths:
             self.archive_json,
             self.daily_csv,
             self.trades_csv,
+            self.distributions_csv,
             self.chart_png,
             self.latest_html,
             self.latest_json,
@@ -78,12 +80,33 @@ def write_paper_report(
         """,
         [portfolio_id],
     )
-    payload = _report_payload(result, snapshot, daily, trades)
+    distributions = _query_frame(
+        paths.database,
+        """
+        SELECT
+            event.account_id, event.trade_date, event.event_type,
+            json_extract_string(event.payload_json, '$.action_id') AS action_id,
+            json_extract_string(event.payload_json, '$.record_date') AS record_date,
+            json_extract_string(event.payload_json, '$.payment_date') AS payment_date,
+            CAST(json_extract(event.payload_json, '$.cash_per_share') AS DOUBLE)
+                AS cash_per_share,
+            event.quantity, event.notional AS cash_amount, event.reason_code,
+            json_extract_string(event.payload_json, '$.source_url') AS source_url
+        FROM paper_events AS event
+        INNER JOIN paper_accounts AS account USING (account_id)
+        WHERE account.portfolio_id = ?
+          AND event.event_type LIKE 'CASH_DISTRIBUTION_%'
+        ORDER BY event.trade_date, event.account_id, event.sequence_no
+        """,
+        [portfolio_id],
+    )
+    payload = _report_payload(result, snapshot, daily, trades, distributions)
     stem = _archive_stem(portfolio_id, snapshot)
     archive_html = _output_path(paths, f"{stem}_report.html")
     archive_json = _output_path(paths, f"{stem}_report.json")
     daily_csv = _output_path(paths, f"{stem}_daily.csv")
     trades_csv = _output_path(paths, f"{stem}_trades.csv")
+    distributions_csv = _output_path(paths, f"{stem}_distributions.csv")
     chart_png = _output_path(paths, f"{stem}_equity.png")
     latest_html = _output_path(paths, f"{portfolio_id}_paper_latest_report.html")
     latest_json = _output_path(paths, f"{portfolio_id}_paper_latest_report.json")
@@ -92,18 +115,27 @@ def write_paper_report(
         archive_json=archive_json,
         daily_csv=daily_csv,
         trades_csv=trades_csv,
+        distributions_csv=distributions_csv,
         chart_png=chart_png,
         latest_html=latest_html,
         latest_json=latest_json,
     )
 
-    document = _html_document(payload, chart_png.name, daily_csv.name, trades_csv.name)
+    document = _html_document(
+        payload,
+        chart_png.name,
+        daily_csv.name,
+        trades_csv.name,
+        distributions_csv.name,
+    )
     if not archive_json.exists():
         _write_json(archive_json, payload)
     if not daily_csv.exists():
         daily.to_csv(daily_csv, index=False, encoding="utf-8-sig")
     if not trades_csv.exists():
         trades.to_csv(trades_csv, index=False, encoding="utf-8-sig")
+    if not distributions_csv.exists():
+        distributions.to_csv(distributions_csv, index=False, encoding="utf-8-sig")
     if not chart_png.exists():
         _write_chart(daily, snapshot, chart_png)
     if not archive_html.exists():
@@ -158,6 +190,7 @@ def _report_payload(
     snapshot: PaperPortfolioSnapshot,
     daily: pd.DataFrame,
     trades: pd.DataFrame,
+    distributions: pd.DataFrame,
 ) -> dict[str, object]:
     accounts: list[dict[str, object]] = []
     for account in snapshot["accounts"]:
@@ -167,6 +200,14 @@ def _report_payload(
         equity = _number(state["equity"], "账户权益")
         account_id = account["account_id"]
         account_trades = trades.loc[trades["account_id"] == account_id]
+        account_distributions = distributions.loc[
+            distributions["account_id"] == account_id
+        ]
+        paid_distributions = account_distributions.loc[
+            account_distributions["event_type"] == "CASH_DISTRIBUTION_PAID"
+        ]
+        pending_entitlements = state["distribution_entitlements"]
+        assert isinstance(pending_entitlements, list)
         accounts.append(
             {
                 **account,
@@ -178,6 +219,15 @@ def _report_payload(
                     "commission_total": float(account_trades["commission"].sum()),
                     "tax_total": float(account_trades["tax"].sum()),
                     "slippage_total": float(account_trades["slippage_cost"].sum()),
+                    "distribution_cash_total": float(
+                        paid_distributions["cash_amount"].sum()
+                    ),
+                    "pending_distribution_cash": sum(
+                        _number(item["cash_amount"], "待到账分红")
+                        for item in pending_entitlements
+                        if isinstance(item, dict)
+                    ),
+                    "pending_distribution_count": len(pending_entitlements),
                 },
             }
         )
@@ -189,11 +239,13 @@ def _report_payload(
         "accounts": accounts,
         "daily_rows": int(len(daily)),
         "trade_rows": int(len(trades)),
+        "distribution_rows": int(len(distributions)),
         "disclaimer": "模拟盘、非实盘、非投资建议；费用与滑点均为假设情景。",
         "limitations": [
             "不连接券商，不发送真实订单。",
             "固定滑点开盘成交是模拟假设，不代表实际成交结果。",
-            "暂未建模分红、除权现金流、停牌和部分成交。",
+            "现金分红只接受本地可审计快照；缺失、格式错误或迟到快照不会被估算。",
+            "暂未建模拆分合并、停牌和部分成交。",
         ],
     }
 
@@ -241,6 +293,7 @@ def _html_document(
     chart_name: str,
     daily_csv_name: str,
     trades_csv_name: str,
+    distributions_csv_name: str,
 ) -> str:
     raw_accounts = payload["accounts"]
     assert isinstance(raw_accounts, list)
@@ -265,6 +318,8 @@ def _html_document(
             f"<td>{float(metrics['cumulative_return']):.2%}</td>"
             f"<td>{float(state['drawdown']):.2%}</td>"
             f"<td>{int(metrics['trade_sides'])}</td>"
+            f"<td>{float(metrics['pending_distribution_cash']):,.2f}</td>"
+            f"<td>{float(metrics['distribution_cash_total']):,.2f}</td>"
             f"<td>{html.escape(str(state['pending_order'] or '无'))}</td>"
             "</tr>"
         )
@@ -294,11 +349,13 @@ img {{ max-width: 100%; }}
 <p class="note">本报告只读取已经提交的本地事件账本。信号在收盘后生成，订单最早在下一根已验证日线
 开盘按假设价格模拟成交。</p>
 <table><thead><tr><th>账户</th><th>固定策略</th><th>现金</th><th>份额</th><th>持仓市值</th>
-<th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>待成交订单</th></tr></thead>
+<th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>待到账分红</th>
+<th>累计分红到账</th><th>待成交订单</th></tr></thead>
 <tbody>{''.join(account_rows)}</tbody></table>
 <img src="{html.escape(chart_name)}" alt="两个模拟账户的净值和回撤图">
 <p><a href="{html.escape(daily_csv_name)}">逐日权益 CSV</a>；
-<a href="{html.escape(trades_csv_name)}">成交明细 CSV</a></p>
+<a href="{html.escape(trades_csv_name)}">成交明细 CSV</a>；
+<a href="{html.escape(distributions_csv_name)}">分红明细 CSV</a></p>
 <h2>数据血缘</h2><ul>{''.join(lineage_blocks)}</ul>
 </body></html>"""
 

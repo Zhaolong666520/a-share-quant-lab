@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
 
+from finance_lab.cash_distributions import CashDistribution
 from finance_lab.ledger import LedgerConfig
 from finance_lab.paper_engine import advance_one_bar, initialize_account, signal_for_history
-from finance_lab.paper_models import StrategySpec, make_default_accounts
+from finance_lab.paper_models import PaperState, PendingOrder, StrategySpec, make_default_accounts
 
 
 def test_signal_warmup_is_not_silently_treated_as_cash() -> None:
@@ -203,3 +205,144 @@ def test_sell_fill_charges_commission_tax_and_slippage_once() -> None:
     assert sold.state.cash == pytest.approx(
         bought.state.cash + fill.notional - fill.commission - fill.tax
     )
+
+
+def test_cash_distribution_uses_record_date_shares_and_pays_after_open_order() -> None:
+    record_date = date(2026, 1, 19)
+    payment_date = date(2026, 1, 22)
+    account = _momentum_account(
+        date(2026, 1, 16),
+        LedgerConfig(commission_bps=0.0, minimum_commission=0.0, slippage_bps=0.0),
+    )
+    state = PaperState(
+        account_id=account.account_id,
+        last_trade_date=date(2026, 1, 16),
+        cash=1_000.0,
+        shares=100,
+        last_close=10.0,
+        equity=2_000.0,
+        equity_peak=2_000.0,
+        drawdown=0.0,
+        last_target_position=1,
+        pending_order=None,
+        last_event_hash=account.config_hash,
+    )
+    distribution = CashDistribution(
+        action_id="a" * 64,
+        symbol="sh.510300",
+        record_date=record_date,
+        ex_date=date(2026, 1, 20),
+        payment_date=payment_date,
+        cash_per_share=0.5,
+        currency="CNY",
+        source_url="https://example.test/notices/510300-2026-01",
+        source_published_at=datetime.fromisoformat("2026-01-15T08:00:00+08:00"),
+        ingested_at=datetime.fromisoformat("2026-01-15T09:00:00+08:00"),
+    )
+    record_history = pd.DataFrame(
+        {
+            "trade_date": [date(2026, 1, 16), record_date],
+            "open": [10.0, 10.0],
+            "close": [10.0, 10.0],
+        }
+    )
+
+    recorded = advance_one_bar(
+        account,
+        state,
+        record_history,
+        cash_distributions=(distribution,),
+    )
+
+    assert [event.event_type for event in recorded.events[:2]] == [
+        "VALUATION",
+        "CASH_DISTRIBUTION_ENTITLED",
+    ]
+    assert recorded.events[1].quantity == 100
+    assert recorded.events[1].notional == pytest.approx(50.0)
+    assert recorded.state.cash == pytest.approx(1_000.0)
+    assert recorded.state.distribution_entitlements[0].action_id == distribution.action_id
+
+    sell_order = PendingOrder(
+        order_id="sell-before-distribution-payment",
+        signal_date=date(2026, 1, 21),
+        action="SELL",
+    )
+    ready_to_sell = replace(recorded.state, pending_order=sell_order)
+    payment_history = pd.DataFrame(
+        {
+            "trade_date": [date(2026, 1, 16), record_date, payment_date],
+            "open": [10.0, 10.0, 10.0],
+            "close": [10.0, 10.0, 10.0],
+        }
+    )
+
+    paid = advance_one_bar(
+        account,
+        ready_to_sell,
+        payment_history,
+        cash_distributions=(distribution,),
+    )
+
+    assert [event.event_type for event in paid.events[:2]] == [
+        "ORDER_FILLED",
+        "CASH_DISTRIBUTION_PAID",
+    ]
+    assert paid.events[1].quantity == 100
+    assert paid.events[1].notional == pytest.approx(50.0)
+    assert paid.state.shares == 0
+    assert paid.state.cash == pytest.approx(2_050.0)
+    assert paid.state.distribution_entitlements == ()
+
+
+def test_cash_distribution_records_zero_share_observation() -> None:
+    previous_date = date(2026, 1, 16)
+    record_date = date(2026, 1, 19)
+    account = _momentum_account(previous_date, LedgerConfig())
+    state = PaperState(
+        account_id=account.account_id,
+        last_trade_date=previous_date,
+        cash=2_000.0,
+        shares=0,
+        last_close=10.0,
+        equity=2_000.0,
+        equity_peak=2_000.0,
+        drawdown=0.0,
+        last_target_position=0,
+        pending_order=None,
+        last_event_hash=account.config_hash,
+    )
+    distribution = CashDistribution(
+        action_id="zero-share-action",
+        symbol=account.symbol,
+        record_date=record_date,
+        ex_date=record_date,
+        payment_date=date(2026, 1, 22),
+        cash_per_share=0.5,
+        currency="CNY",
+        source_url="https://example.test/distributions/zero-share",
+        source_published_at=datetime.fromisoformat("2026-01-15T08:00:00+08:00"),
+        ingested_at=datetime.fromisoformat("2026-01-15T09:00:00+08:00"),
+    )
+    history = pd.DataFrame(
+        {
+            "trade_date": [previous_date, record_date],
+            "open": [10.0, 10.0],
+            "close": [10.0, 10.0],
+        }
+    )
+
+    result = advance_one_bar(
+        account,
+        state,
+        history,
+        cash_distributions=(distribution,),
+    )
+
+    assert [event.event_type for event in result.events[:2]] == [
+        "VALUATION",
+        "CASH_DISTRIBUTION_NOT_ENTITLED",
+    ]
+    assert result.events[1].quantity == 0
+    assert result.events[1].notional == 0.0
+    assert result.state.distribution_entitlements == ()

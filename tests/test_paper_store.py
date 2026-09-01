@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 import pytest
 
+from finance_lab.cash_distributions import CashDistribution
 from finance_lab.ledger import LedgerConfig
 from finance_lab.paper_engine import advance_one_bar, initialize_account
 from finance_lab.paper_models import (
@@ -35,8 +37,15 @@ def test_schema_is_versioned_and_leaves_daily_prices_untouched(tmp_path: Path) -
             ).fetchall()
         }
         version = connection.execute(
-            "SELECT schema_version FROM paper_schema_metadata"
+            "SELECT MAX(schema_version) FROM paper_schema_metadata"
         ).fetchone()
+        state_columns = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'paper_state'"
+            ).fetchall()
+        }
         daily_prices = connection.execute("SELECT sentinel FROM daily_prices").fetchall()
 
     assert table_names == {
@@ -47,8 +56,60 @@ def test_schema_is_versioned_and_leaves_daily_prices_untouched(tmp_path: Path) -
         "paper_events",
         "paper_state",
     }
-    assert version == (1,)
+    assert version == (2,)
+    assert "distribution_entitlements_json" in state_columns
     assert daily_prices == [(1,)]
+
+
+def test_schema_migrates_v1_state_without_losing_cached_values(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "CREATE TABLE paper_schema_metadata ("
+            "schema_version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute("INSERT INTO paper_schema_metadata VALUES (1, CURRENT_TIMESTAMP)")
+        connection.execute(
+            """
+            CREATE TABLE paper_state (
+                account_id VARCHAR PRIMARY KEY,
+                last_trade_date DATE NOT NULL,
+                cash DOUBLE NOT NULL,
+                shares BIGINT NOT NULL,
+                last_close DOUBLE NOT NULL,
+                equity DOUBLE NOT NULL,
+                equity_peak DOUBLE NOT NULL,
+                drawdown DOUBLE NOT NULL,
+                last_target_position INTEGER,
+                pending_order_json VARCHAR,
+                last_event_hash VARCHAR NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO paper_state VALUES (
+                'legacy-account', DATE '2026-01-02', 1000.0, 0, 10.0,
+                1000.0, 1000.0, 0.0, NULL, NULL, 'legacy-hash', CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        migrated = connection.execute(
+            "SELECT cash, last_event_hash, distribution_entitlements_json "
+            "FROM paper_state WHERE account_id = 'legacy-account'"
+        ).fetchone()
+        versions = connection.execute(
+            "SELECT schema_version FROM paper_schema_metadata ORDER BY schema_version"
+        ).fetchall()
+
+    assert migrated == (1000.0, "legacy-hash", "[]")
+    assert versions == [(1,), (2,)]
 
 
 def _history(periods: int) -> pd.DataFrame:
@@ -231,6 +292,90 @@ def test_rebuild_matches_cached_state_and_tampering_fails_audit(tmp_path: Path) 
 
         with pytest.raises(PaperAuditError, match="哈希链"):
             store.audit_portfolio("default")
+
+
+def test_store_persists_and_rebuilds_cash_distribution_entitlements(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    first_account, second_account, first_step, second_step, initial_context = (
+        _accounts_and_initial_steps()
+    )
+    record_history = _history(122)
+    payment_history = _history(123)
+    record_date = record_history.iloc[-1]["trade_date"].date()
+    payment_date = payment_history.iloc[-1]["trade_date"].date()
+    distribution = CashDistribution(
+        action_id="distribution-2026",
+        symbol=first_account.symbol,
+        record_date=record_date,
+        ex_date=record_date,
+        payment_date=payment_date,
+        cash_per_share=0.5,
+        currency="CNY",
+        source_url="https://example.com/distributions/2026",
+        source_published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ingested_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        initial_states = store.initialize_portfolio(
+            (first_account, second_account),
+            (first_step, second_step),
+            initial_context,
+            batch_id="initial",
+        )
+        record_steps = (
+            advance_one_bar(
+                first_account,
+                initial_states[0],
+                record_history,
+                cash_distributions=(distribution,),
+            ),
+            advance_one_bar(
+                second_account,
+                initial_states[1],
+                record_history,
+                cash_distributions=(distribution,),
+            ),
+        )
+        record_states = store.commit_batch(
+            (first_account, second_account),
+            record_steps,
+            _data_context(record_history.iloc[-1]["trade_date"]),
+            batch_id="record-date",
+        )
+
+        cached_record_states = store.load_states("default")
+        assert cached_record_states == record_states
+        assert store.rebuild_state(first_account.account_id) == record_states[0]
+        assert len(record_states[0].distribution_entitlements) == 1
+
+        payment_steps = (
+            advance_one_bar(
+                first_account,
+                record_states[0],
+                payment_history,
+                cash_distributions=(distribution,),
+            ),
+            advance_one_bar(
+                second_account,
+                record_states[1],
+                payment_history,
+                cash_distributions=(distribution,),
+            ),
+        )
+        payment_states = store.commit_batch(
+            (first_account, second_account),
+            payment_steps,
+            _data_context(payment_history.iloc[-1]["trade_date"]),
+            batch_id="payment-date",
+        )
+
+        assert payment_states[0].distribution_entitlements == ()
+        assert store.load_states("default") == payment_states
+        assert store.audit_portfolio("default") == payment_states
 
 
 def test_read_only_store_audits_and_returns_snapshot_without_writing(tmp_path: Path) -> None:

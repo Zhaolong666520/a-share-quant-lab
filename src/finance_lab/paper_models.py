@@ -49,6 +49,17 @@ class PendingOrder:
 
 
 @dataclass(frozen=True)
+class CashDistributionEntitlement:
+    action_id: str
+    record_date: date
+    payment_date: date
+    cash_per_share: float
+    entitled_shares: int
+    cash_amount: float
+    source_url: str
+
+
+@dataclass(frozen=True)
 class PaperState:
     account_id: str
     last_trade_date: date
@@ -61,6 +72,7 @@ class PaperState:
     last_target_position: int | None
     pending_order: PendingOrder | None
     last_event_hash: str
+    distribution_entitlements: tuple[CashDistributionEntitlement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -179,4 +191,3 @@ def make_default_accounts(
         for suffix, strategy in zip(account_suffixes, strategies, strict=True)
     )
     return accounts[0], accounts[1]
-
