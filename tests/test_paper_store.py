@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from finance_lab.paper_models import (
     make_default_accounts,
 )
 from finance_lab.paper_store import PaperAuditError, PaperStore
+from finance_lab.share_adjustments import ShareAdjustment
 
 
 def test_schema_is_versioned_and_leaves_daily_prices_untouched(tmp_path: Path) -> None:
@@ -376,6 +378,136 @@ def test_store_persists_and_rebuilds_cash_distribution_entitlements(
         assert payment_states[0].distribution_entitlements == ()
         assert store.load_states("default") == payment_states
         assert store.audit_portfolio("default") == payment_states
+
+
+def test_store_rebuilds_and_indexes_share_adjustment_events(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    first_account, second_account, first_step, second_step, initial_context = (
+        _accounts_and_initial_steps()
+    )
+    buy_history = _history(122)
+    adjustment_history = _history(123)
+    effective_date = adjustment_history.iloc[-1]["trade_date"].date()
+    adjustment = ShareAdjustment(
+        action_id="share-adjustment-store-test",
+        symbol=first_account.symbol,
+        effective_date=effective_date,
+        ratio_numerator=3,
+        ratio_denominator=8,
+        source_url="https://example.com/share-adjustment/store-test",
+        source_published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ingested_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        initial_states = store.initialize_portfolio(
+            (first_account, second_account),
+            (first_step, second_step),
+            initial_context,
+            batch_id="initial",
+        )
+        buy_states = store.commit_batch(
+            (first_account, second_account),
+            (
+                advance_one_bar(first_account, initial_states[0], buy_history),
+                advance_one_bar(second_account, initial_states[1], buy_history),
+            ),
+            _data_context(buy_history.iloc[-1]["trade_date"]),
+            batch_id="buy",
+        )
+        adjusted_states = store.commit_batch(
+            (first_account, second_account),
+            (
+                advance_one_bar(
+                    first_account,
+                    buy_states[0],
+                    adjustment_history,
+                    share_adjustments=(adjustment,),
+                ),
+                advance_one_bar(
+                    second_account,
+                    buy_states[1],
+                    adjustment_history,
+                    share_adjustments=(adjustment,),
+                ),
+            ),
+            _data_context(adjustment_history.iloc[-1]["trade_date"]),
+            batch_id="share-adjustment",
+        )
+
+        assert [state.shares for state in adjusted_states] == [150, 150]
+        assert store.audit_portfolio("default") == adjusted_states
+        assert store.observed_share_adjustment_ids("default") == {
+            first_account.account_id: frozenset({adjustment.action_id}),
+            second_account.account_id: frozenset({adjustment.action_id}),
+        }
+
+
+def test_audit_rejects_self_consistent_but_false_share_adjustment_ratio(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    first_account, second_account, first_step, second_step, initial_context = (
+        _accounts_and_initial_steps()
+    )
+    buy_history = _history(122)
+    adjustment_history = _history(123)
+    adjustment = ShareAdjustment(
+        action_id="false-ratio-test",
+        symbol=first_account.symbol,
+        effective_date=adjustment_history.iloc[-1]["trade_date"].date(),
+        ratio_numerator=3,
+        ratio_denominator=8,
+        source_url="https://example.com/share-adjustment/false-ratio",
+        source_published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ingested_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        initial_states = store.initialize_portfolio(
+            (first_account, second_account),
+            (first_step, second_step),
+            initial_context,
+            batch_id="initial",
+        )
+        buy_states = store.commit_batch(
+            (first_account, second_account),
+            (
+                advance_one_bar(first_account, initial_states[0], buy_history),
+                advance_one_bar(second_account, initial_states[1], buy_history),
+            ),
+            _data_context(buy_history.iloc[-1]["trade_date"]),
+            batch_id="buy",
+        )
+        valid_steps = (
+            advance_one_bar(
+                first_account,
+                buy_states[0],
+                adjustment_history,
+                share_adjustments=(adjustment,),
+            ),
+            advance_one_bar(
+                second_account,
+                buy_states[1],
+                adjustment_history,
+                share_adjustments=(adjustment,),
+            ),
+        )
+        events = list(valid_steps[0].events)
+        false_payload = {**events[0].payload, "ratio_numerator": 2, "ratio_denominator": 1}
+        events[0] = replace(events[0], payload=false_payload)
+        false_step = replace(valid_steps[0], events=tuple(events))
+        store.commit_batch(
+            (first_account, second_account),
+            (false_step, valid_steps[1]),
+            _data_context(adjustment_history.iloc[-1]["trade_date"]),
+            batch_id="false-ratio",
+        )
+
+        with pytest.raises(PaperAuditError, match="份额调整"):
+            store.audit_portfolio("default")
 
 
 def test_read_only_store_audits_and_returns_snapshot_without_writing(tmp_path: Path) -> None:

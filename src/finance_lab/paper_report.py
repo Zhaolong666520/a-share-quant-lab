@@ -27,6 +27,7 @@ class PaperReportPaths:
     daily_csv: Path
     trades_csv: Path
     distributions_csv: Path
+    share_adjustments_csv: Path
     chart_png: Path
     latest_html: Path
     latest_json: Path
@@ -39,6 +40,7 @@ class PaperReportPaths:
             self.daily_csv,
             self.trades_csv,
             self.distributions_csv,
+            self.share_adjustments_csv,
             self.chart_png,
             self.latest_html,
             self.latest_json,
@@ -100,13 +102,49 @@ def write_paper_report(
         """,
         [portfolio_id],
     )
-    payload = _report_payload(result, snapshot, daily, trades, distributions)
+    share_adjustments = _query_frame(
+        paths.database,
+        """
+        SELECT
+            event.account_id, event.trade_date, event.event_type,
+            json_extract_string(event.payload_json, '$.action_id') AS action_id,
+            json_extract_string(event.payload_json, '$.effective_date') AS effective_date,
+            CAST(json_extract(event.payload_json, '$.ratio_numerator') AS BIGINT)
+                AS ratio_numerator,
+            CAST(json_extract(event.payload_json, '$.ratio_denominator') AS BIGINT)
+                AS ratio_denominator,
+            CAST(json_extract(event.payload_json, '$.shares_before') AS BIGINT)
+                AS shares_before,
+            CAST(json_extract(event.payload_json, '$.shares_after') AS BIGINT)
+                AS shares_after,
+            event.quantity AS share_change, event.reason_code,
+            json_extract_string(event.payload_json, '$.source_url') AS source_url,
+            json_extract_string(event.payload_json, '$.source_published_at')
+                AS source_published_at,
+            json_extract_string(event.payload_json, '$.ingested_at') AS ingested_at
+        FROM paper_events AS event
+        INNER JOIN paper_accounts AS account USING (account_id)
+        WHERE account.portfolio_id = ?
+          AND event.event_type LIKE 'SHARE_ADJUSTMENT_%'
+        ORDER BY event.trade_date, event.account_id, event.sequence_no
+        """,
+        [portfolio_id],
+    )
+    payload = _report_payload(
+        result,
+        snapshot,
+        daily,
+        trades,
+        distributions,
+        share_adjustments,
+    )
     stem = _archive_stem(portfolio_id, snapshot)
     archive_html = _output_path(paths, f"{stem}_report.html")
     archive_json = _output_path(paths, f"{stem}_report.json")
     daily_csv = _output_path(paths, f"{stem}_daily.csv")
     trades_csv = _output_path(paths, f"{stem}_trades.csv")
     distributions_csv = _output_path(paths, f"{stem}_distributions.csv")
+    share_adjustments_csv = _output_path(paths, f"{stem}_share_adjustments.csv")
     chart_png = _output_path(paths, f"{stem}_equity.png")
     latest_html = _output_path(paths, f"{portfolio_id}_paper_latest_report.html")
     latest_json = _output_path(paths, f"{portfolio_id}_paper_latest_report.json")
@@ -116,6 +154,7 @@ def write_paper_report(
         daily_csv=daily_csv,
         trades_csv=trades_csv,
         distributions_csv=distributions_csv,
+        share_adjustments_csv=share_adjustments_csv,
         chart_png=chart_png,
         latest_html=latest_html,
         latest_json=latest_json,
@@ -127,6 +166,7 @@ def write_paper_report(
         daily_csv.name,
         trades_csv.name,
         distributions_csv.name,
+        share_adjustments_csv.name,
     )
     if not archive_json.exists():
         _write_json(archive_json, payload)
@@ -136,6 +176,12 @@ def write_paper_report(
         trades.to_csv(trades_csv, index=False, encoding="utf-8-sig")
     if not distributions_csv.exists():
         distributions.to_csv(distributions_csv, index=False, encoding="utf-8-sig")
+    if not share_adjustments_csv.exists():
+        share_adjustments.to_csv(
+            share_adjustments_csv,
+            index=False,
+            encoding="utf-8-sig",
+        )
     if not chart_png.exists():
         _write_chart(daily, snapshot, chart_png)
     if not archive_html.exists():
@@ -191,6 +237,7 @@ def _report_payload(
     daily: pd.DataFrame,
     trades: pd.DataFrame,
     distributions: pd.DataFrame,
+    share_adjustments: pd.DataFrame,
 ) -> dict[str, object]:
     accounts: list[dict[str, object]] = []
     for account in snapshot["accounts"]:
@@ -205,6 +252,12 @@ def _report_payload(
         ]
         paid_distributions = account_distributions.loc[
             account_distributions["event_type"] == "CASH_DISTRIBUTION_PAID"
+        ]
+        account_adjustments = share_adjustments.loc[
+            share_adjustments["account_id"] == account_id
+        ]
+        applied_adjustments = account_adjustments.loc[
+            account_adjustments["event_type"] == "SHARE_ADJUSTMENT_APPLIED"
         ]
         pending_entitlements = state["distribution_entitlements"]
         assert isinstance(pending_entitlements, list)
@@ -228,6 +281,7 @@ def _report_payload(
                         if isinstance(item, dict)
                     ),
                     "pending_distribution_count": len(pending_entitlements),
+                    "share_adjustment_count": int(len(applied_adjustments)),
                 },
             }
         )
@@ -240,12 +294,14 @@ def _report_payload(
         "daily_rows": int(len(daily)),
         "trade_rows": int(len(trades)),
         "distribution_rows": int(len(distributions)),
+        "share_adjustment_rows": int(len(share_adjustments)),
         "disclaimer": "模拟盘、非实盘、非投资建议；费用与滑点均为假设情景。",
         "limitations": [
             "不连接券商，不发送真实订单。",
             "固定滑点开盘成交是模拟假设，不代表实际成交结果。",
             "现金分红只接受本地可审计快照；缺失、格式错误或迟到快照不会被估算。",
-            "暂未建模拆分合并、停牌和部分成交。",
+            "份额调整只支持同代码且账户结果为整数份；跨代码派送和零碎份额分配会被拒绝。",
+            "暂未建模停牌和部分成交。",
         ],
     }
 
@@ -294,6 +350,7 @@ def _html_document(
     daily_csv_name: str,
     trades_csv_name: str,
     distributions_csv_name: str,
+    share_adjustments_csv_name: str,
 ) -> str:
     raw_accounts = payload["accounts"]
     assert isinstance(raw_accounts, list)
@@ -320,6 +377,7 @@ def _html_document(
             f"<td>{int(metrics['trade_sides'])}</td>"
             f"<td>{float(metrics['pending_distribution_cash']):,.2f}</td>"
             f"<td>{float(metrics['distribution_cash_total']):,.2f}</td>"
+            f"<td>{int(metrics['share_adjustment_count'])}</td>"
             f"<td>{html.escape(str(state['pending_order'] or '无'))}</td>"
             "</tr>"
         )
@@ -350,12 +408,13 @@ img {{ max-width: 100%; }}
 开盘按假设价格模拟成交。</p>
 <table><thead><tr><th>账户</th><th>固定策略</th><th>现金</th><th>份额</th><th>持仓市值</th>
 <th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>待到账分红</th>
-<th>累计分红到账</th><th>待成交订单</th></tr></thead>
+<th>累计分红到账</th><th>份额调整次数</th><th>待成交订单</th></tr></thead>
 <tbody>{''.join(account_rows)}</tbody></table>
 <img src="{html.escape(chart_name)}" alt="两个模拟账户的净值和回撤图">
 <p><a href="{html.escape(daily_csv_name)}">逐日权益 CSV</a>；
 <a href="{html.escape(trades_csv_name)}">成交明细 CSV</a>；
-<a href="{html.escape(distributions_csv_name)}">分红明细 CSV</a></p>
+<a href="{html.escape(distributions_csv_name)}">分红明细 CSV</a>；
+<a href="{html.escape(share_adjustments_csv_name)}">份额调整 CSV</a></p>
 <h2>数据血缘</h2><ul>{''.join(lineage_blocks)}</ul>
 </body></html>"""
 

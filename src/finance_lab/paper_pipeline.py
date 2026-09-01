@@ -31,6 +31,10 @@ from finance_lab.paper_models import (
 )
 from finance_lab.paper_report import write_paper_report
 from finance_lab.paper_store import PaperStore
+from finance_lab.share_adjustments import (
+    ShareAdjustment,
+    load_share_adjustment_snapshots,
+)
 from finance_lab.validation import DataValidationError, assert_valid_daily_prices
 
 
@@ -187,6 +191,10 @@ def paper_run_portfolio(
             paths.raw / "cash_distributions",
             symbol="sh.510300",
         )
+        share_adjustments = load_share_adjustment_snapshots(
+            paths.raw / "share_adjustments",
+            symbol="sh.510300",
+        )
         with PaperStore(paths.database) as store:
             store.ensure_schema()
             if not store.portfolio_exists(portfolio_id):
@@ -209,6 +217,14 @@ def paper_run_portfolio(
                 frozenset(prices["trade_date"].dt.date),
                 snapshot.data_context.data_end_date,
             )
+            _validate_share_adjustment_timing(
+                share_adjustments,
+                accounts,
+                states,
+                store.observed_share_adjustment_ids(portfolio_id),
+                frozenset(prices["trade_date"].dt.date),
+                snapshot.data_context.data_end_date,
+            )
             unseen_dates = tuple(
                 pd.Timestamp(value).date()
                 for value in prices.loc[
@@ -225,6 +241,7 @@ def paper_run_portfolio(
                         state,
                         history,
                         cash_distributions=cash_distributions,
+                        share_adjustments=share_adjustments,
                     )
                     for account, state in zip(accounts, current_states, strict=True)
                 )
@@ -310,6 +327,36 @@ def _validate_distribution_timing(
                 raise PaperDataGateError(
                     f"现金分红 {distribution.action_id[:12]} 快照迟到：登记日已经处理，"
                     "拒绝静默漏记，请检查账本后重新初始化账户组"
+                )
+
+
+def _validate_share_adjustment_timing(
+    share_adjustments: tuple[ShareAdjustment, ...],
+    accounts: tuple[PaperAccount, ...],
+    states: tuple[PaperState, ...],
+    observed_by_account: dict[str, frozenset[str]],
+    market_dates: frozenset[date],
+    data_end_date: date,
+) -> None:
+    for account, state in zip(accounts, states, strict=True):
+        observed = observed_by_account.get(account.account_id, frozenset())
+        for adjustment in share_adjustments:
+            if adjustment.effective_date <= account.created_market_date:
+                continue
+            if (
+                adjustment.effective_date <= data_end_date
+                and adjustment.effective_date not in market_dates
+            ):
+                raise PaperDataGateError(
+                    f"份额调整 {adjustment.action_id[:12]} 的生效日不在行情交易日中"
+                )
+            if (
+                adjustment.effective_date <= state.last_trade_date
+                and adjustment.action_id not in observed
+            ):
+                raise PaperDataGateError(
+                    f"份额调整 {adjustment.action_id[:12]} 快照迟到：生效日已经处理，"
+                    "拒绝静默改写持仓，请检查账本后重新初始化账户组"
                 )
 
 

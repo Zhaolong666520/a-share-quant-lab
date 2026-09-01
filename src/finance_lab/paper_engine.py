@@ -19,6 +19,7 @@ from finance_lab.paper_models import (
     PendingOrder,
     StrategySpec,
 )
+from finance_lab.share_adjustments import ShareAdjustment
 
 
 def signal_for_history(closes: pd.Series, spec: StrategySpec) -> int | None:
@@ -153,8 +154,8 @@ def _state_after_valuation(
     next_shares = state.shares if shares is None else shares
     if not math.isfinite(next_cash) or next_cash < -1e-8:
         raise ValueError("现金不能为负或非有限")
-    if next_shares < 0 or next_shares % account.ledger_config.lot_size != 0:
-        raise ValueError("份额必须是非负整手")
+    if type(next_shares) is not int or next_shares < 0:
+        raise ValueError("份额必须是非负整数")
     equity = next_cash + next_shares * close
     if not math.isfinite(equity) or equity <= 0.0:
         raise ValueError("账户权益必须是有限正数")
@@ -301,8 +302,9 @@ def advance_one_bar(
     history: pd.DataFrame,
     *,
     cash_distributions: tuple[CashDistribution, ...] = (),
+    share_adjustments: tuple[ShareAdjustment, ...] = (),
 ) -> EngineStep:
-    """Fill any prior order at the supplied bar open, then calculate its close signal."""
+    """Apply effective actions, fill the prior order, then calculate the close signal."""
     validate_ledger_config(account.ledger_config)
     trade_date, raw_open, close = _current_bar(history)
     if state.account_id != account.account_id:
@@ -310,9 +312,59 @@ def advance_one_bar(
     if trade_date <= state.last_trade_date:
         raise ValueError("新行情日期必须晚于账户最后处理日期")
 
+    events: list[PaperEventDraft] = []
+    for adjustment in sorted(share_adjustments, key=lambda item: item.action_id):
+        if adjustment.symbol != account.symbol:
+            raise ValueError("份额调整标的与账户不一致")
+        if adjustment.effective_date != trade_date:
+            continue
+        adjusted_numerator = state.shares * adjustment.ratio_numerator
+        adjusted_shares, remainder = divmod(
+            adjusted_numerator,
+            adjustment.ratio_denominator,
+        )
+        if remainder:
+            raise ValueError("份额调整产生无法确定的零碎份额，拒绝自动入账")
+        previous_shares = state.shares
+        state = _state_after_valuation(
+            account,
+            state,
+            trade_date,
+            close,
+            cash=state.cash,
+            shares=adjusted_shares,
+            pending_order=state.pending_order,
+            last_target_position=state.last_target_position,
+        )
+        events.append(
+            _event(
+                (
+                    "SHARE_ADJUSTMENT_APPLIED"
+                    if previous_shares > 0
+                    else "SHARE_ADJUSTMENT_NOT_APPLICABLE"
+                ),
+                trade_date,
+                state,
+                quantity=abs(adjusted_shares - previous_shares),
+                reason_code=(
+                    None if previous_shares > 0 else "NO_SHARES_BEFORE_EFFECTIVE_OPEN"
+                ),
+                payload={
+                    "action_id": adjustment.action_id,
+                    "effective_date": adjustment.effective_date.isoformat(),
+                    "ratio_numerator": adjustment.ratio_numerator,
+                    "ratio_denominator": adjustment.ratio_denominator,
+                    "shares_before": previous_shares,
+                    "shares_after": adjusted_shares,
+                    "source_url": adjustment.source_url,
+                    "source_published_at": adjustment.source_published_at.isoformat(),
+                    "ingested_at": adjustment.ingested_at.isoformat(),
+                },
+            )
+        )
+
     cash = state.cash
     shares = state.shares
-    events: list[PaperEventDraft] = []
     if state.pending_order is not None:
         order = state.pending_order
         if order.action == "BUY":

@@ -10,6 +10,7 @@ from finance_lab.cash_distributions import CashDistribution
 from finance_lab.ledger import LedgerConfig
 from finance_lab.paper_engine import advance_one_bar, initialize_account, signal_for_history
 from finance_lab.paper_models import PaperState, PendingOrder, StrategySpec, make_default_accounts
+from finance_lab.share_adjustments import ShareAdjustment
 
 
 def test_signal_warmup_is_not_silently_treated_as_cash() -> None:
@@ -346,3 +347,166 @@ def test_cash_distribution_records_zero_share_observation() -> None:
     assert result.events[1].quantity == 0
     assert result.events[1].notional == 0.0
     assert result.state.distribution_entitlements == ()
+
+
+def test_share_adjustment_applies_before_pending_open_sell() -> None:
+    previous_date = date(2026, 1, 19)
+    effective_date = date(2026, 1, 20)
+    account = _momentum_account(
+        previous_date,
+        LedgerConfig(commission_bps=0.0, minimum_commission=0.0, slippage_bps=0.0),
+    )
+    state = PaperState(
+        account_id=account.account_id,
+        last_trade_date=previous_date,
+        cash=1_000.0,
+        shares=100,
+        last_close=10.0,
+        equity=2_000.0,
+        equity_peak=2_000.0,
+        drawdown=0.0,
+        last_target_position=0,
+        pending_order=PendingOrder(
+            order_id="sell-after-adjustment",
+            signal_date=previous_date,
+            action="SELL",
+        ),
+        last_event_hash=account.config_hash,
+    )
+    adjustment = ShareAdjustment(
+        action_id="share-adjustment-2026",
+        symbol=account.symbol,
+        effective_date=effective_date,
+        ratio_numerator=3,
+        ratio_denominator=2,
+        source_url="https://example.test/notices/share-adjustment",
+        source_published_at=datetime.fromisoformat("2026-01-15T08:00:00+08:00"),
+        ingested_at=datetime.fromisoformat("2026-01-15T09:00:00+08:00"),
+    )
+    adjusted_price = 20.0 / 3.0
+    history = pd.DataFrame(
+        {
+            "trade_date": [previous_date, effective_date],
+            "open": [10.0, adjusted_price],
+            "close": [10.0, adjusted_price],
+        }
+    )
+
+    result = advance_one_bar(
+        account,
+        state,
+        history,
+        share_adjustments=(adjustment,),
+    )
+
+    assert [event.event_type for event in result.events[:2]] == [
+        "SHARE_ADJUSTMENT_APPLIED",
+        "ORDER_FILLED",
+    ]
+    assert result.events[0].quantity == 50
+    assert result.events[0].shares_after == 150
+    assert result.events[1].quantity == 150
+    assert result.state.shares == 0
+    assert result.state.cash == pytest.approx(2_000.0)
+
+
+def test_share_adjustment_rejects_fractional_account_result() -> None:
+    previous_date = date(2026, 1, 19)
+    effective_date = date(2026, 1, 20)
+    account = _momentum_account(previous_date, LedgerConfig())
+    state = PaperState(
+        account_id=account.account_id,
+        last_trade_date=previous_date,
+        cash=1_000.0,
+        shares=100,
+        last_close=10.0,
+        equity=2_000.0,
+        equity_peak=2_000.0,
+        drawdown=0.0,
+        last_target_position=1,
+        pending_order=None,
+        last_event_hash=account.config_hash,
+    )
+    adjustment = ShareAdjustment(
+        action_id="fractional-adjustment",
+        symbol=account.symbol,
+        effective_date=effective_date,
+        ratio_numerator=4,
+        ratio_denominator=3,
+        source_url="https://example.test/notices/fractional-adjustment",
+        source_published_at=datetime.fromisoformat("2026-01-15T08:00:00+08:00"),
+        ingested_at=datetime.fromisoformat("2026-01-15T09:00:00+08:00"),
+    )
+    history = pd.DataFrame(
+        {
+            "trade_date": [previous_date, effective_date],
+            "open": [10.0, 7.5],
+            "close": [10.0, 7.5],
+        }
+    )
+
+    with pytest.raises(ValueError, match="零碎份额"):
+        advance_one_bar(
+            account,
+            state,
+            history,
+            share_adjustments=(adjustment,),
+        )
+
+
+def test_share_adjustment_does_not_scale_effective_date_open_buy() -> None:
+    previous_date = date(2026, 1, 19)
+    effective_date = date(2026, 1, 20)
+    account = _momentum_account(
+        previous_date,
+        LedgerConfig(commission_bps=0.0, minimum_commission=0.0, slippage_bps=0.0),
+    )
+    state = PaperState(
+        account_id=account.account_id,
+        last_trade_date=previous_date,
+        cash=1_000.0,
+        shares=0,
+        last_close=10.0,
+        equity=1_000.0,
+        equity_peak=1_000.0,
+        drawdown=0.0,
+        last_target_position=1,
+        pending_order=PendingOrder(
+            order_id="buy-after-adjustment",
+            signal_date=previous_date,
+            action="BUY",
+        ),
+        last_event_hash=account.config_hash,
+    )
+    adjustment = ShareAdjustment(
+        action_id="zero-share-adjustment",
+        symbol=account.symbol,
+        effective_date=effective_date,
+        ratio_numerator=2,
+        ratio_denominator=1,
+        source_url="https://example.test/notices/zero-share-adjustment",
+        source_published_at=datetime.fromisoformat("2026-01-15T08:00:00+08:00"),
+        ingested_at=datetime.fromisoformat("2026-01-15T09:00:00+08:00"),
+    )
+    history = pd.DataFrame(
+        {
+            "trade_date": [previous_date, effective_date],
+            "open": [10.0, 5.0],
+            "close": [10.0, 5.0],
+        }
+    )
+
+    result = advance_one_bar(
+        account,
+        state,
+        history,
+        share_adjustments=(adjustment,),
+    )
+
+    assert [event.event_type for event in result.events[:2]] == [
+        "SHARE_ADJUSTMENT_NOT_APPLICABLE",
+        "ORDER_FILLED",
+    ]
+    assert result.events[0].reason_code == "NO_SHARES_BEFORE_EFFECTIVE_OPEN"
+    assert result.events[1].quantity == 200
+    assert result.state.shares == 200

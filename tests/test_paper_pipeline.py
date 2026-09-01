@@ -286,6 +286,83 @@ def test_paper_run_rejects_distribution_snapshot_added_after_record_date(
         )
 
 
+def test_paper_run_posts_validated_share_adjustment_before_open_orders(
+    tmp_path: Path,
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    created_on = prices["trade_date"].max().date()
+    paper_init_portfolio(root=tmp_path, as_of_date=created_on)
+    updated, latest_date = _append_rising_bars(paths, prices, count=2)
+    effective_date = updated["trade_date"].iloc[-1].date()
+    published_date = effective_date - timedelta(days=2)
+    ingested_date = effective_date - timedelta(days=1)
+    snapshot = paths.raw / "share_adjustments" / "2026-test-adjustment.csv"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(
+        "symbol,effective_date,ratio_numerator,ratio_denominator,source_url,"
+        "source_published_at,ingested_at\n"
+        f"sh.510300,{effective_date},3,8,https://example.com/etf/adjustment,"
+        f"{published_date}T09:00:00+08:00,{ingested_date}T09:00:00+08:00\n",
+        encoding="utf-8",
+    )
+
+    result = paper_run_portfolio(root=tmp_path, as_of_date=latest_date)
+
+    assert result.processed_dates == tuple(
+        item.date() for item in updated["trade_date"].tail(2)
+    )
+    assert [state.shares for state in result.states] == [150, 150]
+    with duckdb.connect(str(paths.database), read_only=True) as connection:
+        events = connection.execute(
+            "SELECT event_type, quantity, shares_after FROM paper_events "
+            "WHERE event_type LIKE 'SHARE_ADJUSTMENT_%' "
+            "ORDER BY account_id"
+        ).fetchall()
+    assert events == [
+        ("SHARE_ADJUSTMENT_APPLIED", 250, 150),
+        ("SHARE_ADJUSTMENT_APPLIED", 250, 150),
+    ]
+    report_payload = json.loads(
+        (paths.outputs / "default_paper_latest_report.json").read_text(encoding="utf-8")
+    )
+    assert report_payload["share_adjustment_rows"] == 2
+    assert all(
+        account["metrics"]["share_adjustment_count"] == 1
+        for account in report_payload["accounts"]
+    )
+    assert any(
+        "SHARE_ADJUSTMENT_APPLIED" in path.read_text(encoding="utf-8-sig")
+        for path in paths.outputs.glob("*_share_adjustments.csv")
+    )
+
+
+def test_paper_run_rejects_share_adjustment_added_after_effective_date(
+    tmp_path: Path,
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    created_on = prices["trade_date"].max().date()
+    paper_init_portfolio(root=tmp_path, as_of_date=created_on)
+    updated, effective_date = _append_rising_bars(paths, prices, count=1)
+    paper_run_portfolio(root=tmp_path, as_of_date=effective_date)
+    published_date = effective_date - timedelta(days=2)
+    ingested_date = effective_date - timedelta(days=1)
+    snapshot = paths.raw / "share_adjustments" / "2026-late-adjustment.csv"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(
+        "symbol,effective_date,ratio_numerator,ratio_denominator,source_url,"
+        "source_published_at,ingested_at\n"
+        f"sh.510300,{effective_date},2,1,https://example.com/etf/late-adjustment,"
+        f"{published_date}T09:00:00+08:00,{ingested_date}T09:00:00+08:00\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PaperDataGateError, match="迟到"):
+        paper_run_portfolio(
+            root=tmp_path,
+            as_of_date=updated["trade_date"].max().date(),
+        )
+
+
 def test_paper_status_is_read_only_and_missing_portfolio_is_explicit(tmp_path: Path) -> None:
     paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
     as_of_date = prices["trade_date"].max().date()

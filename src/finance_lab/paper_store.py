@@ -536,6 +536,45 @@ class PaperStore:
             for account_id, action_ids in observed.items()
         }
 
+    def observed_share_adjustment_ids(
+        self,
+        portfolio_id: str,
+    ) -> dict[str, frozenset[str]]:
+        """Return share adjustments explicitly observed by each account."""
+        account_rows = self._require_connection().execute(
+            "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
+            [portfolio_id],
+        ).fetchall()
+        observed: dict[str, set[str]] = {
+            str(account_id): set() for (account_id,) in account_rows
+        }
+        rows = self._require_connection().execute(
+            """
+            SELECT event.account_id, event.payload_json
+            FROM paper_events AS event
+            INNER JOIN paper_accounts AS account USING (account_id)
+            WHERE account.portfolio_id = ?
+              AND event.event_type IN (
+                  'SHARE_ADJUSTMENT_APPLIED',
+                  'SHARE_ADJUSTMENT_NOT_APPLICABLE'
+              )
+            ORDER BY event.trade_date, event.account_id, event.sequence_no
+            """,
+            [portfolio_id],
+        ).fetchall()
+        for account_id_raw, payload_json in rows:
+            account_id = str(account_id_raw)
+            payload = _load_canonical_object(
+                str(payload_json), "份额调整观察事件 payload"
+            )
+            observed[account_id].add(
+                _required_string(payload, "action_id", "份额调整观察事件")
+            )
+        return {
+            account_id: frozenset(action_ids)
+            for account_id, action_ids in observed.items()
+        }
+
     def load_accounts(self, portfolio_id: str) -> tuple[PaperAccount, ...]:
         """Restore the immutable account definitions after their audit succeeds."""
         rows = self._require_connection().execute(
@@ -787,6 +826,7 @@ class PaperStore:
         pending_order: PendingOrder | None = None
         distribution_entitlements: dict[str, CashDistributionEntitlement] = {}
         seen_distribution_ids: set[str] = set()
+        seen_share_adjustment_ids: set[str] = set()
         first_event = True
 
         for row in rows:
@@ -901,6 +941,43 @@ class PaperStore:
                 if pending_order is None or str(order_id_raw) != pending_order.order_id:
                     raise PaperAuditError(f"模拟账户 {account_id} 的订单事件无法匹配待成交订单")
                 pending_order = None
+            elif str(event_type) in {
+                "SHARE_ADJUSTMENT_APPLIED",
+                "SHARE_ADJUSTMENT_NOT_APPLICABLE",
+            }:
+                (
+                    action_id,
+                    effective_date,
+                    ratio_numerator,
+                    ratio_denominator,
+                    shares_before,
+                    payload_shares_after,
+                ) = _share_adjustment_event_fields(payload)
+                expected_numerator = shares_before * ratio_numerator
+                expected_shares, remainder = divmod(
+                    expected_numerator,
+                    ratio_denominator,
+                )
+                if (
+                    action_id in seen_share_adjustment_ids
+                    or effective_date != last_trade_date
+                    or shares_before != prior_shares
+                    or remainder != 0
+                    or payload_shares_after != expected_shares
+                    or shares != expected_shares
+                    or int(quantity) != abs(expected_shares - shares_before)
+                    or not math.isclose(float(notional), 0.0, abs_tol=1e-12)
+                    or not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8)
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的份额调整事件无效")
+                if str(event_type) == "SHARE_ADJUSTMENT_APPLIED" and shares_before <= 0:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的份额调整事件类型无效")
+                if (
+                    str(event_type) == "SHARE_ADJUSTMENT_NOT_APPLICABLE"
+                    and shares_before != 0
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的份额调整观察事件无效")
+                seen_share_adjustment_ids.add(action_id)
             elif str(event_type) == "CASH_DISTRIBUTION_NOT_ENTITLED":
                 (
                     action_id,
@@ -1403,6 +1480,47 @@ def _distribution_event_fields(
     return action_id, record_date, payment_date, cash_per_share, source_url
 
 
+def _share_adjustment_event_fields(
+    payload: dict[str, object],
+) -> tuple[str, date, int, int, int, int]:
+    label = "份额调整事件"
+    action_id = _required_string(payload, "action_id", label)
+    if "effective_date" not in payload:
+        raise PaperAuditError(f"{label}缺少生效日期")
+    effective_date = _as_date(payload["effective_date"])
+    ratio_numerator = _as_int(payload.get("ratio_numerator"), f"{label}比例分子")
+    ratio_denominator = _as_int(payload.get("ratio_denominator"), f"{label}比例分母")
+    shares_before = _as_int(payload.get("shares_before"), f"{label}调整前份额")
+    shares_after = _as_int(payload.get("shares_after"), f"{label}调整后份额")
+    if (
+        ratio_numerator <= 0
+        or ratio_denominator <= 0
+        or ratio_numerator == ratio_denominator
+        or math.gcd(ratio_numerator, ratio_denominator) != 1
+        or shares_before < 0
+        or shares_after < 0
+    ):
+        raise PaperAuditError(f"{label}比例或份额无效")
+    source_url = _required_string(payload, "source_url", label)
+    parsed_url = urlparse(source_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise PaperAuditError(f"{label}来源链接无效")
+    source_published_at = _as_datetime(
+        _required_string(payload, "source_published_at", label), label
+    )
+    ingested_at = _as_datetime(_required_string(payload, "ingested_at", label), label)
+    if source_published_at.date() > effective_date or source_published_at > ingested_at:
+        raise PaperAuditError(f"{label}来源时间无效")
+    return (
+        action_id,
+        effective_date,
+        ratio_numerator,
+        ratio_denominator,
+        shares_before,
+        shares_after,
+    )
+
+
 def _entitlement_from_event(
     payload: dict[str, object],
     quantity: int,
@@ -1488,6 +1606,18 @@ def _as_date(value: object) -> date:
         except ValueError as exc:
             raise PaperAuditError("账本日期无效") from exc
     raise PaperAuditError("账本日期无效")
+
+
+def _as_datetime(value: object, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise PaperAuditError(f"{label}时间无效")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise PaperAuditError(f"{label}时间无效") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PaperAuditError(f"{label}时间必须带时区")
+    return parsed
 
 
 def _assert_state_numbers(
