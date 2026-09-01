@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -294,6 +294,153 @@ def test_rebuild_matches_cached_state_and_tampering_fails_audit(tmp_path: Path) 
 
         with pytest.raises(PaperAuditError, match="哈希链"):
             store.audit_portfolio("default")
+
+
+def test_store_persists_and_rebuilds_deferred_order_attempt_count(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    history = _history(121)
+    accounts = make_default_accounts(
+        "default",
+        history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(
+            initial_cash=1_000.0,
+            commission_bps=0.0,
+            minimum_commission=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+    initial_steps = tuple(initialize_account(account, history) for account in accounts)
+    next_history = _history(122)
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        initial_states = store.initialize_portfolio(
+            accounts,
+            initial_steps,
+            _data_context(history.iloc[-1]["trade_date"]),
+            batch_id="initial",
+        )
+        deferred_steps = tuple(
+            advance_one_bar(account, state, next_history)
+            for account, state in zip(accounts, initial_states, strict=True)
+        )
+        persisted = store.commit_batch(
+            accounts,
+            deferred_steps,
+            _data_context(next_history.iloc[-1]["trade_date"]),
+            batch_id="deferred",
+        )
+
+        assert all(state.pending_order is not None for state in persisted)
+        assert [state.pending_order.attempt_count for state in persisted] == [1, 1]
+        assert store.load_states("default") == persisted
+        assert tuple(store.rebuild_state(account.account_id) for account in accounts) == persisted
+        assert store.audit_portfolio("default") == persisted
+
+
+def test_audit_rejects_fill_with_wrong_signal_date_even_when_hash_is_consistent(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    first_account, second_account, first_step, second_step, initial_context = (
+        _accounts_and_initial_steps()
+    )
+    next_history = _history(122)
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        initial_states = store.initialize_portfolio(
+            (first_account, second_account),
+            (first_step, second_step),
+            initial_context,
+            batch_id="initial",
+        )
+        first_next = advance_one_bar(first_account, initial_states[0], next_history)
+        second_next = advance_one_bar(second_account, initial_states[1], next_history)
+        first_events = list(first_next.events)
+        assert first_events[0].signal_date is not None
+        first_events[0] = replace(
+            first_events[0],
+            signal_date=first_events[0].signal_date - timedelta(days=1),
+        )
+        store.commit_batch(
+            (first_account, second_account),
+            (replace(first_next, events=tuple(first_events)), second_next),
+            _data_context(next_history.iloc[-1]["trade_date"]),
+            batch_id="wrong-signal-date",
+        )
+
+        with pytest.raises(PaperAuditError, match="无法匹配待成交订单"):
+            store.audit_portfolio("default")
+
+
+def test_store_rebuilds_cancelled_and_expired_order_lifecycles(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    history = _history(121)
+    accounts = make_default_accounts(
+        "default",
+        history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(
+            initial_cash=1_000.0,
+            commission_bps=0.0,
+            minimum_commission=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+    initial_steps = tuple(initialize_account(account, history) for account in accounts)
+    first_history = _history(122)
+    second_history = _history(123)
+    second_history.loc[second_history.index[-1], ["open", "close"]] = 50.0
+    third_history = pd.concat(
+        [
+            second_history,
+            pd.DataFrame(
+                {
+                    "trade_date": [pd.bdate_range("2026-01-02", periods=124)[-1]],
+                    "open": [51.0],
+                    "close": [51.0],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        states = store.initialize_portfolio(
+            accounts,
+            initial_steps,
+            _data_context(history.iloc[-1]["trade_date"]),
+            batch_id="initial",
+        )
+        for batch_id, current_history in (
+            ("first-attempt", first_history),
+            ("second-attempt", second_history),
+            ("third-attempt", third_history),
+        ):
+            steps = tuple(
+                advance_one_bar(account, state, current_history)
+                for account, state in zip(accounts, states, strict=True)
+            )
+            states = store.commit_batch(
+                accounts,
+                steps,
+                _data_context(current_history.iloc[-1]["trade_date"]),
+                batch_id=batch_id,
+            )
+
+        event_types = store._require_connection().execute(
+            "SELECT account_id, event_type FROM paper_events "
+            "WHERE event_type IN ('ORDER_CANCELLED', 'ORDER_EXPIRED') "
+            "ORDER BY account_id, event_type"
+        ).fetchall()
+
+        assert event_types == [
+            (accounts[1].account_id, "ORDER_CANCELLED"),
+            (accounts[0].account_id, "ORDER_EXPIRED"),
+        ]
+        assert all(state.pending_order is None for state in states)
+        assert store.audit_portfolio("default") == states
 
 
 def test_store_persists_and_rebuilds_cash_distribution_entitlements(

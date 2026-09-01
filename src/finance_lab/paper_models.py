@@ -14,6 +14,7 @@ from finance_lab.ledger import LedgerConfig, validate_ledger_config
 PaperStrategyName = Literal["sma", "momentum"]
 PaperAction = Literal["BUY", "SELL"]
 PaperOperationStatus = Literal["initialized", "processed", "no-op", "status"]
+MAX_ORDER_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class PendingOrder:
     order_id: str
     signal_date: date
     action: PaperAction
+    attempt_count: int = 0
 
 
 @dataclass(frozen=True)

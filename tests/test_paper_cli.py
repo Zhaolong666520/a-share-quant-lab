@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 import finance_lab.cli as cli_module
 from finance_lab.cli import build_parser, main
-from finance_lab.paper_models import PaperOperationResult, PaperOperationStatus
+from finance_lab.paper_models import (
+    PaperOperationResult,
+    PaperOperationStatus,
+    PaperState,
+    PendingOrder,
+)
 from finance_lab.paper_pipeline import PaperPortfolioNotFound
 
 
@@ -95,6 +101,34 @@ def test_paper_cli_returns_four_for_missing_portfolio(
 
     assert main(["paper-status"]) == 4
     assert "不存在" in capsys.readouterr().err
+
+
+def test_paper_cli_status_includes_pending_order_attempt_count() -> None:
+    trade_date = date(2026, 8, 28)
+    state = PaperState(
+        account_id="default-momentum-120-v1",
+        last_trade_date=trade_date,
+        cash=1_000.0,
+        shares=0,
+        last_close=10.0,
+        equity=1_000.0,
+        equity_peak=1_000.0,
+        drawdown=0.0,
+        last_target_position=1,
+        pending_order=PendingOrder("order-1", trade_date, "BUY", attempt_count=2),
+        last_event_hash="h" * 64,
+    )
+    result = PaperOperationResult(
+        status="status",
+        portfolio_id="default",
+        processed_dates=(),
+        states=(state,),
+        data_context=None,
+    )
+
+    payload = cli_module._paper_operation_payload(result)
+
+    assert payload["accounts"][0]["pending_order"]["attempt_count"] == 2
 
 
 def test_windows_paper_script_checks_every_command_and_uses_latest_report() -> None:

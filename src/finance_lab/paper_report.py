@@ -26,6 +26,7 @@ class PaperReportPaths:
     archive_json: Path
     daily_csv: Path
     trades_csv: Path
+    order_events_csv: Path
     distributions_csv: Path
     share_adjustments_csv: Path
     chart_png: Path
@@ -39,6 +40,7 @@ class PaperReportPaths:
             self.archive_json,
             self.daily_csv,
             self.trades_csv,
+            self.order_events_csv,
             self.distributions_csv,
             self.share_adjustments_csv,
             self.chart_png,
@@ -79,6 +81,26 @@ def write_paper_report(
         INNER JOIN paper_accounts AS account USING (account_id)
         WHERE account.portfolio_id = ? AND event.event_type = 'ORDER_FILLED'
         ORDER BY event.trade_date, account.account_id, event.sequence_no
+        """,
+        [portfolio_id],
+    )
+    order_events = _query_frame(
+        paths.database,
+        """
+        SELECT
+            event.account_id, event.trade_date, event.event_type, event.signal_date,
+            event.order_id, event.action, event.quantity, event.reference_price,
+            event.execution_price, event.reason_code,
+            COALESCE(
+                CAST(json_extract(event.payload_json, '$.attempt_count') AS INTEGER),
+                CASE WHEN event.event_type = 'ORDER_CREATED' THEN 0 ELSE NULL END
+            ) AS attempt_count,
+            json_extract_string(event.payload_json, '$.last_failure_reason')
+                AS last_failure_reason
+        FROM paper_events AS event
+        INNER JOIN paper_accounts AS account USING (account_id)
+        WHERE account.portfolio_id = ? AND event.event_type LIKE 'ORDER_%'
+        ORDER BY event.trade_date, event.account_id, event.sequence_no
         """,
         [portfolio_id],
     )
@@ -135,6 +157,7 @@ def write_paper_report(
         snapshot,
         daily,
         trades,
+        order_events,
         distributions,
         share_adjustments,
     )
@@ -143,6 +166,7 @@ def write_paper_report(
     archive_json = _output_path(paths, f"{stem}_report.json")
     daily_csv = _output_path(paths, f"{stem}_daily.csv")
     trades_csv = _output_path(paths, f"{stem}_trades.csv")
+    order_events_csv = _output_path(paths, f"{stem}_order_events.csv")
     distributions_csv = _output_path(paths, f"{stem}_distributions.csv")
     share_adjustments_csv = _output_path(paths, f"{stem}_share_adjustments.csv")
     chart_png = _output_path(paths, f"{stem}_equity.png")
@@ -153,6 +177,7 @@ def write_paper_report(
         archive_json=archive_json,
         daily_csv=daily_csv,
         trades_csv=trades_csv,
+        order_events_csv=order_events_csv,
         distributions_csv=distributions_csv,
         share_adjustments_csv=share_adjustments_csv,
         chart_png=chart_png,
@@ -165,6 +190,7 @@ def write_paper_report(
         chart_png.name,
         daily_csv.name,
         trades_csv.name,
+        order_events_csv.name,
         distributions_csv.name,
         share_adjustments_csv.name,
     )
@@ -174,6 +200,8 @@ def write_paper_report(
         daily.to_csv(daily_csv, index=False, encoding="utf-8-sig")
     if not trades_csv.exists():
         trades.to_csv(trades_csv, index=False, encoding="utf-8-sig")
+    if not order_events_csv.exists():
+        order_events.to_csv(order_events_csv, index=False, encoding="utf-8-sig")
     if not distributions_csv.exists():
         distributions.to_csv(distributions_csv, index=False, encoding="utf-8-sig")
     if not share_adjustments_csv.exists():
@@ -236,6 +264,7 @@ def _report_payload(
     snapshot: PaperPortfolioSnapshot,
     daily: pd.DataFrame,
     trades: pd.DataFrame,
+    order_events: pd.DataFrame,
     distributions: pd.DataFrame,
     share_adjustments: pd.DataFrame,
 ) -> dict[str, object]:
@@ -247,6 +276,7 @@ def _report_payload(
         equity = _number(state["equity"], "账户权益")
         account_id = account["account_id"]
         account_trades = trades.loc[trades["account_id"] == account_id]
+        account_order_events = order_events.loc[order_events["account_id"] == account_id]
         account_distributions = distributions.loc[
             distributions["account_id"] == account_id
         ]
@@ -261,6 +291,24 @@ def _report_payload(
         ]
         pending_entitlements = state["distribution_entitlements"]
         assert isinstance(pending_entitlements, list)
+        pending_order = state["pending_order"]
+        if pending_order is not None and not isinstance(pending_order, dict):
+            raise ValueError("报告中的待成交订单格式无效")
+        pending_attempt_count = (
+            int(pending_order.get("attempt_count", 0))
+            if isinstance(pending_order, dict)
+            else None
+        )
+        pending_order_age_days = (
+            int(
+                (
+                    pd.Timestamp(str(state["last_trade_date"]))
+                    - pd.Timestamp(str(pending_order["signal_date"]))
+                ).days
+            )
+            if isinstance(pending_order, dict)
+            else None
+        )
         accounts.append(
             {
                 **account,
@@ -269,6 +317,20 @@ def _report_payload(
                     * _number(state["last_close"], "账户收盘价"),
                     "cumulative_return": equity / initial_cash - 1.0,
                     "trade_sides": int(len(account_trades)),
+                    "order_created_count": int(
+                        (account_order_events["event_type"] == "ORDER_CREATED").sum()
+                    ),
+                    "order_deferred_count": int(
+                        (account_order_events["event_type"] == "ORDER_DEFERRED").sum()
+                    ),
+                    "order_expired_count": int(
+                        (account_order_events["event_type"] == "ORDER_EXPIRED").sum()
+                    ),
+                    "order_cancelled_count": int(
+                        (account_order_events["event_type"] == "ORDER_CANCELLED").sum()
+                    ),
+                    "pending_order_attempt_count": pending_attempt_count,
+                    "pending_order_age_days": pending_order_age_days,
                     "commission_total": float(account_trades["commission"].sum()),
                     "tax_total": float(account_trades["tax"].sum()),
                     "slippage_total": float(account_trades["slippage_cost"].sum()),
@@ -293,12 +355,14 @@ def _report_payload(
         "accounts": accounts,
         "daily_rows": int(len(daily)),
         "trade_rows": int(len(trades)),
+        "order_event_rows": int(len(order_events)),
         "distribution_rows": int(len(distributions)),
         "share_adjustment_rows": int(len(share_adjustments)),
         "disclaimer": "模拟盘、非实盘、非投资建议；费用与滑点均为假设情景。",
         "limitations": [
             "不连接券商，不发送真实订单。",
             "固定滑点开盘成交是模拟假设，不代表实际成交结果。",
+            "待成交买单最多尝试 3 次；资金不足会延期，第三次失败会过期。",
             "现金分红只接受本地可审计快照；缺失、格式错误或迟到快照不会被估算。",
             "份额调整只支持同代码且账户结果为整数份；跨代码派送和零碎份额分配会被拒绝。",
             "暂未建模停牌和部分成交。",
@@ -349,6 +413,7 @@ def _html_document(
     chart_name: str,
     daily_csv_name: str,
     trades_csv_name: str,
+    order_events_csv_name: str,
     distributions_csv_name: str,
     share_adjustments_csv_name: str,
 ) -> str:
@@ -364,6 +429,15 @@ def _html_document(
         assert isinstance(state, dict)
         assert isinstance(metrics, dict)
         assert isinstance(latest_run, dict)
+        pending_order = state["pending_order"]
+        if isinstance(pending_order, dict):
+            pending_order_label = (
+                f"{pending_order.get('action')}｜信号日 {pending_order.get('signal_date')}｜"
+                f"已尝试 {metrics['pending_order_attempt_count']} 次｜"
+                f"年龄 {metrics['pending_order_age_days']} 天"
+            )
+        else:
+            pending_order_label = "无"
         account_rows.append(
             "<tr>"
             f"<td>{html.escape(str(raw_account['account_id']))}</td>"
@@ -375,10 +449,13 @@ def _html_document(
             f"<td>{float(metrics['cumulative_return']):.2%}</td>"
             f"<td>{float(state['drawdown']):.2%}</td>"
             f"<td>{int(metrics['trade_sides'])}</td>"
+            f"<td>{int(metrics['order_deferred_count'])}/"
+            f"{int(metrics['order_expired_count'])}/"
+            f"{int(metrics['order_cancelled_count'])}</td>"
             f"<td>{float(metrics['pending_distribution_cash']):,.2f}</td>"
             f"<td>{float(metrics['distribution_cash_total']):,.2f}</td>"
             f"<td>{int(metrics['share_adjustment_count'])}</td>"
-            f"<td>{html.escape(str(state['pending_order'] or '无'))}</td>"
+            f"<td>{html.escape(pending_order_label)}</td>"
             "</tr>"
         )
         lineage_blocks.append(
@@ -407,12 +484,13 @@ img {{ max-width: 100%; }}
 <p class="note">本报告只读取已经提交的本地事件账本。信号在收盘后生成，订单最早在下一根已验证日线
 开盘按假设价格模拟成交。</p>
 <table><thead><tr><th>账户</th><th>固定策略</th><th>现金</th><th>份额</th><th>持仓市值</th>
-<th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>待到账分红</th>
+  <th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>延期/过期/取消</th><th>待到账分红</th>
 <th>累计分红到账</th><th>份额调整次数</th><th>待成交订单</th></tr></thead>
 <tbody>{''.join(account_rows)}</tbody></table>
 <img src="{html.escape(chart_name)}" alt="两个模拟账户的净值和回撤图">
-<p><a href="{html.escape(daily_csv_name)}">逐日权益 CSV</a>；
-<a href="{html.escape(trades_csv_name)}">成交明细 CSV</a>；
+  <p><a href="{html.escape(daily_csv_name)}">逐日权益 CSV</a>；
+  <a href="{html.escape(trades_csv_name)}">成交明细 CSV</a>；
+  <a href="{html.escape(order_events_csv_name)}">订单生命周期 CSV</a>；
 <a href="{html.escape(distributions_csv_name)}">分红明细 CSV</a>；
 <a href="{html.escape(share_adjustments_csv_name)}">份额调整 CSV</a></p>
 <h2>数据血缘</h2><ul>{''.join(lineage_blocks)}</ul>

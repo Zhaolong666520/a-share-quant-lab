@@ -17,6 +17,7 @@ import duckdb
 
 from finance_lab.ledger import LedgerConfig, validate_ledger_config
 from finance_lab.paper_models import (
+    MAX_ORDER_ATTEMPTS,
     CashDistributionEntitlement,
     EngineStep,
     PaperAccount,
@@ -932,14 +933,85 @@ class PaperStore:
             elif str(event_type) == "ORDER_CREATED":
                 if order_id_raw is None or signal_date_raw is None or action_raw is None:
                     raise PaperAuditError(f"模拟账户 {account_id} 的待成交订单字段不完整")
+                if pending_order is not None:
+                    raise PaperAuditError(f"模拟账户 {account_id} 重复创建待成交订单")
                 pending_order = PendingOrder(
                     order_id=str(order_id_raw),
                     signal_date=_as_date(signal_date_raw),
                     action=_as_action(action_raw, "订单事件"),
                 )
+            elif str(event_type) == "ORDER_DEFERRED":
+                _assert_matching_pending_order(
+                    account_id,
+                    pending_order,
+                    order_id_raw,
+                    signal_date_raw,
+                    action_raw,
+                )
+                assert pending_order is not None
+                attempt_count = _as_int(payload.get("attempt_count"), "订单延期尝试次数")
+                if (
+                    attempt_count != pending_order.attempt_count + 1
+                    or attempt_count >= MAX_ORDER_ATTEMPTS
+                    or str(reason_code) != "INSUFFICIENT_CASH_FOR_ONE_LOT"
+                    or not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8)
+                    or shares != prior_shares
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的订单延期事件无效")
+                pending_order = replace(pending_order, attempt_count=attempt_count)
+            elif str(event_type) == "ORDER_EXPIRED":
+                _assert_matching_pending_order(
+                    account_id,
+                    pending_order,
+                    order_id_raw,
+                    signal_date_raw,
+                    action_raw,
+                )
+                assert pending_order is not None
+                attempt_count = _as_int(payload.get("attempt_count"), "订单过期尝试次数")
+                if (
+                    attempt_count != pending_order.attempt_count + 1
+                    or attempt_count != MAX_ORDER_ATTEMPTS
+                    or str(reason_code) != "MAX_ORDER_ATTEMPTS_REACHED"
+                    or not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8)
+                    or shares != prior_shares
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的订单过期事件无效")
+                pending_order = None
+            elif str(event_type) == "ORDER_CANCELLED":
+                _assert_matching_pending_order(
+                    account_id,
+                    pending_order,
+                    order_id_raw,
+                    signal_date_raw,
+                    action_raw,
+                )
+                assert pending_order is not None
+                attempt_count = _as_int(payload.get("attempt_count"), "订单取消尝试次数")
+                pending_target = 1 if pending_order.action == "BUY" else 0
+                if (
+                    attempt_count != pending_order.attempt_count
+                    or last_target_position in {None, pending_target}
+                    or str(reason_code) != "TARGET_REVERSED"
+                    or not math.isclose(cash, prior_cash, rel_tol=0.0, abs_tol=1e-8)
+                    or shares != prior_shares
+                ):
+                    raise PaperAuditError(f"模拟账户 {account_id} 的订单取消事件无效")
+                pending_order = None
             elif str(event_type) in {"ORDER_FILLED", "ORDER_SKIPPED"}:
-                if pending_order is None or str(order_id_raw) != pending_order.order_id:
-                    raise PaperAuditError(f"模拟账户 {account_id} 的订单事件无法匹配待成交订单")
+                _assert_matching_pending_order(
+                    account_id,
+                    pending_order,
+                    order_id_raw,
+                    signal_date_raw,
+                    action_raw,
+                )
+                assert pending_order is not None
+                attempt_count_raw = payload.get("attempt_count")
+                if attempt_count_raw is not None and _as_int(
+                    attempt_count_raw, "订单成交尝试次数"
+                ) != pending_order.attempt_count + 1:
+                    raise PaperAuditError(f"模拟账户 {account_id} 的订单成交尝试次数无效")
                 pending_order = None
             elif str(event_type) in {
                 "SHARE_ADJUSTMENT_APPLIED",
@@ -1159,11 +1231,14 @@ def _run_id(batch_id: str, account_id: str, trade_date: date) -> str:
 def _pending_order_payload(state: PaperState) -> dict[str, object] | None:
     if state.pending_order is None:
         return None
-    return {
+    payload: dict[str, object] = {
         "order_id": state.pending_order.order_id,
         "signal_date": state.pending_order.signal_date.isoformat(),
         "action": state.pending_order.action,
     }
+    if state.pending_order.attempt_count:
+        payload["attempt_count"] = state.pending_order.attempt_count
+    return payload
 
 
 def _entitlement_payload(
@@ -1261,6 +1336,7 @@ def _state_from_row(row: tuple[object, ...]) -> PaperState:
             order_id=_required_string(pending_payload, "order_id", "待成交订单"),
             signal_date=_as_date(pending_payload["signal_date"]),
             action=_required_action(pending_payload, "待成交订单"),
+            attempt_count=_pending_attempt_count(pending_payload),
         )
         if pending_payload is not None
         else None
@@ -1559,6 +1635,32 @@ def _distribution_entitlements_from_json(
 
 def _assert_canonical_json(serialized: str, label: str) -> None:
     _load_canonical_object(serialized, label)
+
+
+def _pending_attempt_count(payload: dict[str, object]) -> int:
+    attempt_count = _as_int(payload.get("attempt_count", 0), "待成交订单尝试次数")
+    if attempt_count < 0 or attempt_count >= MAX_ORDER_ATTEMPTS:
+        raise PaperAuditError("待成交订单尝试次数无效")
+    return attempt_count
+
+
+def _assert_matching_pending_order(
+    account_id: str,
+    pending_order: PendingOrder | None,
+    order_id: object,
+    signal_date: object,
+    action: object,
+) -> None:
+    if (
+        pending_order is None
+        or order_id is None
+        or signal_date is None
+        or action is None
+        or str(order_id) != pending_order.order_id
+        or _as_date(signal_date) != pending_order.signal_date
+        or _as_action(action, "订单事件") != pending_order.action
+    ):
+        raise PaperAuditError(f"模拟账户 {account_id} 的订单事件无法匹配待成交订单")
 
 
 def _required_string(payload: dict[str, object], field: str, label: str) -> str:

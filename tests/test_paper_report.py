@@ -43,6 +43,15 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     assert {state.account_id for state in result.states} == {
         item["account_id"] for item in payload["accounts"]
     }
+    assert outputs.order_events_csv.exists()
+    assert payload["order_event_rows"] == 2
+    assert all(
+        account["metrics"]["order_created_count"] == 1
+        and account["metrics"]["pending_order_attempt_count"] == 0
+        and account["metrics"]["pending_order_age_days"] == 0
+        for account in payload["accounts"]
+    )
+    assert "订单生命周期 CSV" in document
 
 
 def test_paper_report_keeps_archive_identity_and_recovers_missing_file(tmp_path: Path) -> None:

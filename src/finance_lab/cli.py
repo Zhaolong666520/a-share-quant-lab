@@ -107,6 +107,7 @@ def _paper_operation_payload(result: object) -> dict[str, object]:
                         "order_id": state.pending_order.order_id,
                         "signal_date": state.pending_order.signal_date.isoformat(),
                         "action": state.pending_order.action,
+                        "attempt_count": state.pending_order.attempt_count,
                     }
                     if state.pending_order
                     else None

@@ -10,6 +10,7 @@ import pandas as pd
 from finance_lab.cash_distributions import CashDistribution
 from finance_lab.ledger import affordable_shares, commission_for, validate_ledger_config
 from finance_lab.paper_models import (
+    MAX_ORDER_ATTEMPTS,
     CashDistributionEntitlement,
     EngineStep,
     PaperAccount,
@@ -233,7 +234,7 @@ def _signal_events(
         state,
         trade_date,
         state.last_close,
-        pending_order=None,
+        pending_order=state.pending_order,
         last_target_position=state.last_target_position if target is None else target,
     )
     signal_event = _event(
@@ -246,6 +247,32 @@ def _signal_events(
     )
     if target is None:
         return signal_state, (signal_event,)
+    if state.pending_order is not None:
+        pending_target = 1 if state.pending_order.action == "BUY" else 0
+        if target == pending_target:
+            return signal_state, (signal_event,)
+        cancelled_state = _state_after_valuation(
+            account,
+            signal_state,
+            trade_date,
+            state.last_close,
+            pending_order=None,
+            last_target_position=target,
+        )
+        cancelled_event = _event(
+            "ORDER_CANCELLED",
+            trade_date,
+            cancelled_state,
+            signal_date=state.pending_order.signal_date,
+            order_id=state.pending_order.order_id,
+            action=state.pending_order.action,
+            reason_code="TARGET_REVERSED",
+            payload={
+                "target_position": target,
+                "attempt_count": state.pending_order.attempt_count,
+            },
+        )
+        return cancelled_state, (signal_event, cancelled_event)
     order = _order_for_target(account, state, target, trade_date)
     if order is None:
         return signal_state, (signal_event,)
@@ -311,6 +338,10 @@ def advance_one_bar(
         raise ValueError("账户状态与账户配置不匹配")
     if trade_date <= state.last_trade_date:
         raise ValueError("新行情日期必须晚于账户最后处理日期")
+    if state.pending_order is not None and not (
+        0 <= state.pending_order.attempt_count < MAX_ORDER_ATTEMPTS
+    ):
+        raise ValueError("待成交订单尝试次数必须处于有效范围")
 
     events: list[PaperEventDraft] = []
     for adjustment in sorted(share_adjustments, key=lambda item: item.action_id):
@@ -371,24 +402,45 @@ def advance_one_bar(
             execution_price = raw_open * (1.0 + account.ledger_config.slippage_bps / 10_000.0)
             quantity = affordable_shares(cash, execution_price, account.ledger_config)
             if quantity == 0:
+                attempt_count = order.attempt_count + 1
+                deferred_order = PendingOrder(
+                    order_id=order.order_id,
+                    signal_date=order.signal_date,
+                    action=order.action,
+                    attempt_count=attempt_count,
+                )
                 after_order = _state_after_valuation(
                     account,
                     state,
                     trade_date,
                     close,
-                    pending_order=None,
+                    pending_order=(
+                        None if attempt_count >= MAX_ORDER_ATTEMPTS else deferred_order
+                    ),
                     last_target_position=state.last_target_position,
                 )
                 events.append(
                     _event(
-                        "ORDER_SKIPPED",
+                        (
+                            "ORDER_EXPIRED"
+                            if attempt_count >= MAX_ORDER_ATTEMPTS
+                            else "ORDER_DEFERRED"
+                        ),
                         trade_date,
                         after_order,
                         signal_date=order.signal_date,
                         order_id=order.order_id,
                         action=order.action,
                         reference_price=raw_open,
-                        reason_code="INSUFFICIENT_CASH_FOR_ONE_LOT",
+                        reason_code=(
+                            "MAX_ORDER_ATTEMPTS_REACHED"
+                            if attempt_count >= MAX_ORDER_ATTEMPTS
+                            else "INSUFFICIENT_CASH_FOR_ONE_LOT"
+                        ),
+                        payload={
+                            "attempt_count": attempt_count,
+                            "last_failure_reason": "INSUFFICIENT_CASH_FOR_ONE_LOT",
+                        },
                     )
                 )
             else:
@@ -420,6 +472,7 @@ def advance_one_bar(
                         notional=notional,
                         commission=commission,
                         slippage_cost=quantity * (execution_price - raw_open),
+                        payload={"attempt_count": order.attempt_count + 1},
                     )
                 )
         else:
@@ -477,6 +530,7 @@ def advance_one_bar(
                         commission=commission,
                         tax=tax,
                         slippage_cost=quantity * (raw_open - execution_price),
+                        payload={"attempt_count": order.attempt_count + 1},
                     )
                 )
         state_after_order = after_order

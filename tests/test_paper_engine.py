@@ -87,7 +87,7 @@ def test_initial_signal_creates_order_filled_at_next_bar_open() -> None:
     )
 
 
-def test_insufficient_cash_skips_once_without_recreating_same_buy_order() -> None:
+def test_insufficient_cash_defers_buy_order_for_another_opening_attempt() -> None:
     initial_history = _history([float(value) for value in range(100, 221)])
     account = _momentum_account(
         initial_history.iloc[-1]["trade_date"].date(),
@@ -100,14 +100,128 @@ def test_insufficient_cash_skips_once_without_recreating_same_buy_order() -> Non
     )
 
     created = initialize_account(account, initial_history)
-    skipped = advance_one_bar(account, created.state, _history(list(range(100, 222))))
-    repeated = advance_one_bar(account, skipped.state, _history(list(range(100, 223))))
+    deferred = advance_one_bar(account, created.state, _history(list(range(100, 222))))
 
-    assert [event.event_type for event in skipped.events][:1] == ["ORDER_SKIPPED"]
-    assert skipped.state.pending_order is None
-    assert skipped.state.last_target_position == 1
-    assert "ORDER_CREATED" not in [event.event_type for event in repeated.events]
-    assert "ORDER_SKIPPED" not in [event.event_type for event in repeated.events]
+    assert deferred.events[0].event_type == "ORDER_DEFERRED"
+    assert deferred.events[0].reason_code == "INSUFFICIENT_CASH_FOR_ONE_LOT"
+    assert deferred.state.pending_order is not None
+    assert deferred.state.pending_order.order_id == created.state.pending_order.order_id
+    assert deferred.state.pending_order.attempt_count == 1
+
+
+def test_buy_order_expires_after_three_failed_attempts_without_recreation() -> None:
+    initial_history = _history([float(value) for value in range(100, 221)])
+    account = _momentum_account(
+        initial_history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(
+            initial_cash=1_000.0,
+            commission_bps=0.0,
+            minimum_commission=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+
+    created = initialize_account(account, initial_history)
+    first = advance_one_bar(account, created.state, _history(list(range(100, 222))))
+    second = advance_one_bar(account, first.state, _history(list(range(100, 223))))
+    expired = advance_one_bar(account, second.state, _history(list(range(100, 224))))
+    after_expiry = advance_one_bar(
+        account,
+        expired.state,
+        _history(list(range(100, 225))),
+    )
+
+    assert first.events[0].event_type == "ORDER_DEFERRED"
+    assert second.events[0].event_type == "ORDER_DEFERRED"
+    assert expired.events[0].event_type == "ORDER_EXPIRED"
+    assert expired.events[0].payload["attempt_count"] == 3
+    assert expired.state.pending_order is None
+    assert not {
+        "ORDER_CREATED",
+        "ORDER_DEFERRED",
+        "ORDER_EXPIRED",
+    }.intersection(event.event_type for event in after_expiry.events)
+
+
+def test_close_signal_reversal_cancels_a_deferred_buy_order() -> None:
+    initial_history = _history([float(value) for value in range(100, 221)])
+    account = _momentum_account(
+        initial_history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(
+            initial_cash=1_000.0,
+            commission_bps=0.0,
+            minimum_commission=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+
+    created = initialize_account(account, initial_history)
+    deferred = advance_one_bar(account, created.state, _history(list(range(100, 222))))
+    reversed_signal = advance_one_bar(
+        account,
+        deferred.state,
+        _history([*range(100, 222), 50]),
+    )
+
+    assert [event.event_type for event in reversed_signal.events] == [
+        "ORDER_DEFERRED",
+        "VALUATION",
+        "SIGNAL_GENERATED",
+        "ORDER_CANCELLED",
+    ]
+    cancelled = reversed_signal.events[-1]
+    assert cancelled.order_id == created.state.pending_order.order_id
+    assert cancelled.reason_code == "TARGET_REVERSED"
+    assert cancelled.payload["attempt_count"] == 2
+    assert reversed_signal.state.pending_order is None
+    assert reversed_signal.state.last_target_position == 0
+
+
+def test_deferred_buy_fills_with_same_order_id_when_later_affordable() -> None:
+    initial_history = _history([float(value) for value in range(100, 221)])
+    account = _momentum_account(
+        initial_history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(
+            initial_cash=1_000.0,
+            commission_bps=0.0,
+            minimum_commission=0.0,
+            slippage_bps=0.0,
+        ),
+    )
+
+    created = initialize_account(account, initial_history)
+    deferred = advance_one_bar(account, created.state, _history(list(range(100, 222))))
+    affordable_history = _history(list(range(100, 223)))
+    affordable_history.loc[affordable_history.index[-1], "open"] = 5.0
+    filled = advance_one_bar(account, deferred.state, affordable_history)
+
+    fill = filled.events[0]
+    assert fill.event_type == "ORDER_FILLED"
+    assert fill.order_id == created.state.pending_order.order_id
+    assert fill.payload["attempt_count"] == 2
+    assert filled.state.pending_order is None
+    assert "ORDER_CREATED" not in [event.event_type for event in filled.events]
+
+
+@pytest.mark.parametrize("attempt_count", [-1, 3])
+def test_engine_rejects_invalid_pending_order_attempt_count(attempt_count: int) -> None:
+    initial_history = _history([float(value) for value in range(100, 221)])
+    account = _momentum_account(
+        initial_history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(initial_cash=1_000.0),
+    )
+    created = initialize_account(account, initial_history)
+    assert created.state.pending_order is not None
+    invalid_state = replace(
+        created.state,
+        pending_order=replace(
+            created.state.pending_order,
+            attempt_count=attempt_count,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="尝试次数"):
+        advance_one_bar(account, invalid_state, _history(list(range(100, 222))))
 
 
 def test_buy_fill_applies_slippage_and_commission_once() -> None:
