@@ -17,6 +17,10 @@ import pandas as pd
 
 from finance_lab.config import ProjectPaths
 from finance_lab.paper_attribution import build_daily_attribution
+from finance_lab.paper_benchmark import (
+    calculate_relative_performance,
+    calculate_shared_price_benchmark,
+)
 from finance_lab.paper_models import PaperDataContext, PaperOperationResult, validate_portfolio_id
 from finance_lab.paper_risk import (
     DEFAULT_PAPER_RISK_POLICY,
@@ -26,7 +30,7 @@ from finance_lab.paper_risk import (
 from finance_lab.paper_store import PaperPortfolioSnapshot, PaperStore
 from finance_lab.validation import assert_valid_daily_prices
 
-PAPER_REPORT_SCHEMA_VERSION = 2
+PAPER_REPORT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -381,6 +385,7 @@ def _report_payload(
     share_adjustments: pd.DataFrame,
     risk_policy: PaperRiskPolicy,
 ) -> dict[str, object]:
+    forward_benchmark = calculate_shared_price_benchmark(daily)
     accounts: list[dict[str, object]] = []
     for account in snapshot["accounts"]:
         state = account["state"]
@@ -425,6 +430,12 @@ def _report_payload(
             else None
         )
         risk_snapshot = calculate_paper_risk(account_daily, risk_policy)
+        relative_performance = calculate_relative_performance(
+            account_daily,
+            initial_cash=initial_cash,
+            benchmark=forward_benchmark,
+            risk_gate_status=risk_snapshot.gate_status,
+        )
         accounts.append(
             {
                 **account,
@@ -432,6 +443,7 @@ def _report_payload(
                     **asdict(risk_snapshot),
                     "breach_codes": list(risk_snapshot.breach_codes),
                 },
+                "relative_performance": asdict(relative_performance),
                 "metrics": {
                     "market_value": _number(state["shares"], "账户份额")
                     * _number(state["last_close"], "账户收盘价"),
@@ -494,6 +506,7 @@ def _report_payload(
             "scope": "extended_paper_observation_only",
             "authorizes_real_money": False,
         },
+        "forward_benchmark": asdict(forward_benchmark),
         "portfolio_id": result.portfolio_id,
         "operation_status": result.status,
         "processed_dates": [item.isoformat() for item in result.processed_dates],
@@ -569,8 +582,10 @@ def _html_document(
 ) -> str:
     raw_accounts = payload["accounts"]
     raw_risk_policy = payload["risk_policy"]
+    raw_forward_benchmark = payload["forward_benchmark"]
     assert isinstance(raw_accounts, list)
     assert isinstance(raw_risk_policy, dict)
+    assert isinstance(raw_forward_benchmark, dict)
     risk_policy_summary = (
         f"至少 {int(raw_risk_policy['minimum_return_observations'])} 个收益观察；"
         f"最大回撤不差于 -{float(raw_risk_policy['maximum_drawdown']):.0%}；"
@@ -582,16 +597,19 @@ def _html_document(
     account_rows: list[str] = []
     attribution_rows: list[str] = []
     risk_rows: list[str] = []
+    benchmark_rows: list[str] = []
     lineage_blocks: list[str] = []
     for raw_account in raw_accounts:
         assert isinstance(raw_account, dict)
         state = raw_account["state"]
         metrics = raw_account["metrics"]
         risk = raw_account["risk"]
+        relative = raw_account["relative_performance"]
         latest_run = raw_account["latest_run"]
         assert isinstance(state, dict)
         assert isinstance(metrics, dict)
         assert isinstance(risk, dict)
+        assert isinstance(relative, dict)
         assert isinstance(latest_run, dict)
         pending_order = state["pending_order"]
         if isinstance(pending_order, dict):
@@ -665,6 +683,26 @@ def _html_document(
             f"<td>{html.escape(status_labels[str(risk['gate_status'])])}</td>"
             "</tr>"
         )
+        evidence_status_labels = {
+            "insufficient_history": "历史不足",
+            "risk_limit_breached": "风险门槛超限",
+            "did_not_beat_cash": "未跑赢现金基准",
+            "did_not_beat_asset_price": "未跑赢标的价格基准",
+            "extended_paper_observation": "仅允许继续模拟观察",
+        }
+        benchmark_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(raw_account['account_id']))}</td>"
+            f"<td>{float(relative['account_total_return']):.2%}</td>"
+            f"<td>{float(relative['cash_benchmark_return']):.2%}</td>"
+            f"<td>{float(relative['return_difference_vs_cash']):.2%}</td>"
+            f"<td>{float(relative['asset_price_benchmark_return']):.2%}</td>"
+            f"<td>{float(relative['return_difference_vs_asset_price']):.2%}</td>"
+            f"<td>{'是' if bool(relative['beat_cash']) else '否'}</td>"
+            f"<td>{'是' if bool(relative['beat_asset_price']) else '否'}</td>"
+            f"<td>{html.escape(evidence_status_labels[str(relative['gate_status'])])}</td>"
+            "</tr>"
+        )
         lineage_blocks.append(
             "<li>"
             f"<code>{html.escape(str(raw_account['account_id']))}</code>：数据集 "
@@ -701,6 +739,16 @@ img {{ max-width: 100%; }}
 <table><thead><tr><th>账户</th><th>收益观察数</th><th>年化波动率</th><th>最大回撤</th>
 <th>当前回撤</th><th>最差单日</th><th>亏损天数</th><th>最长连亏</th><th>平均仓位</th><th>当前仓位</th>
 <th>超限项</th><th>模拟观察门禁</th></tr></thead><tbody>{''.join(risk_rows)}</tbody></table>
+<h2>前向基准对比</h2>
+<p class="note">共同期间 {html.escape(str(raw_forward_benchmark['start_date']))} 至
+{html.escape(str(raw_forward_benchmark['end_date']))}，共
+{int(raw_forward_benchmark['return_observations'])} 个收益观察；现金基准固定为 0%。
+不复权价格基准收益为 {float(raw_forward_benchmark['total_return']):.2%}，不包含现金分红和份额调整，
+不是完整总回报。表中差异是百分点差，不是策略 alpha。</p>
+<table><thead><tr><th>账户</th><th>账户收益</th><th>现金基准</th><th>相对现金</th>
+<th>不复权价格基准</th><th>相对价格基准</th><th>跑赢现金</th><th>跑赢价格基准</th>
+<th>研究证据门禁</th></tr></thead>
+<tbody>{''.join(benchmark_rows)}</tbody></table>
 <h2>收益归因（元）</h2>
 <p class="note">交易时点贡献是相对“当日开盘不交易”的机械差异；份额调整桥接项用于对齐不复权价格，
 两者都不等同于策略 alpha。所有分项必须与权益变化逐日对账。</p>

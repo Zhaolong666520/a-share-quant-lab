@@ -37,7 +37,7 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     payload = json.loads(outputs.archive_json.read_text(encoding="utf-8"))
     document = outputs.archive_html.read_text(encoding="utf-8")
     assert len(payload["accounts"]) == 2
-    assert payload["report_schema_version"] == 2
+    assert payload["report_schema_version"] == 3
     assert payload["risk_policy"] == {
         "minimum_return_observations": 60,
         "maximum_drawdown": 0.15,
@@ -62,6 +62,32 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
         account["metrics"]["order_created_count"] == 1
         and account["metrics"]["pending_order_attempt_count"] == 0
         and account["metrics"]["pending_order_age_days"] == 0
+        for account in payload["accounts"]
+    )
+    assert payload["forward_benchmark"] == {
+        "kind": "unadjusted_close_price_only",
+        "start_date": result.states[0].last_trade_date.isoformat(),
+        "end_date": result.states[0].last_trade_date.isoformat(),
+        "valuation_observations": 1,
+        "return_observations": 0,
+        "start_close": pytest.approx(result.states[0].last_close),
+        "end_close": pytest.approx(result.states[0].last_close),
+        "total_return": pytest.approx(0.0),
+        "annualized_volatility": None,
+        "max_drawdown": pytest.approx(0.0),
+        "includes_cash_distributions": False,
+        "includes_share_adjustments": False,
+    }
+    assert all(
+        account["relative_performance"]["account_total_return"]
+        == pytest.approx(0.0)
+        and account["relative_performance"]["return_difference_vs_cash"]
+        == pytest.approx(0.0)
+        and account["relative_performance"]["return_difference_vs_asset_price"]
+        == pytest.approx(0.0)
+        and account["relative_performance"]["gate_status"]
+        == "insufficient_history"
+        and not account["relative_performance"]["gate_passed"]
         for account in payload["accounts"]
     )
     assert all(
@@ -89,6 +115,11 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     assert "年化波动率不高于 30%" in document
     assert "最长连续亏损不超过 5 天" in document
     assert "不授权投入真实资金" in document
+    assert "前向基准对比" in document
+    assert "现金基准" in document
+    assert "不复权价格基准" in document
+    assert "跑赢现金" in document
+    assert "百分点差" in document
 
 
 def test_paper_report_keeps_archive_identity_and_recovers_missing_file(tmp_path: Path) -> None:
@@ -123,13 +154,18 @@ def test_paper_report_archive_identity_includes_the_report_schema(
 ) -> None:
     paths, result = _initialized_result(tmp_path)
     first = write_paper_report(result, paths)
-    monkeypatch.setattr(paper_report_module, "PAPER_REPORT_SCHEMA_VERSION", 3)
+    next_version = paper_report_module.PAPER_REPORT_SCHEMA_VERSION + 1
+    monkeypatch.setattr(
+        paper_report_module,
+        "PAPER_REPORT_SCHEMA_VERSION",
+        next_version,
+    )
 
     second = write_paper_report(result, paths)
 
     assert second.archive_json != first.archive_json
     second_payload = json.loads(second.archive_json.read_text(encoding="utf-8"))
-    assert second_payload["report_schema_version"] == 3
+    assert second_payload["report_schema_version"] == next_version
 
 
 def test_paper_report_rejects_unsafe_portfolio_output_name(tmp_path: Path) -> None:
