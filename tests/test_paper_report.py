@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+import finance_lab.paper_report as paper_report_module
 from finance_lab.paper_pipeline import paper_init_portfolio
 from finance_lab.paper_report import write_paper_report
+from finance_lab.paper_risk import DEFAULT_PAPER_RISK_POLICY
 from tests.paper_helpers import make_paper_test_project, write_update_summary
 
 
@@ -35,6 +37,15 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     payload = json.loads(outputs.archive_json.read_text(encoding="utf-8"))
     document = outputs.archive_html.read_text(encoding="utf-8")
     assert len(payload["accounts"]) == 2
+    assert payload["report_schema_version"] == 2
+    assert payload["risk_policy"] == {
+        "minimum_return_observations": 60,
+        "maximum_drawdown": 0.15,
+        "maximum_annualized_volatility": 0.3,
+        "maximum_consecutive_losing_days": 5,
+        "scope": "extended_paper_observation_only",
+        "authorizes_real_money": False,
+    }
     assert "模拟盘" in document
     assert "非实盘" in document
     assert "非投资建议" in document
@@ -58,9 +69,26 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
         and account["metrics"]["attribution_residual"] == pytest.approx(0.0)
         for account in payload["accounts"]
     )
+    assert all(
+        account["risk"]["valuation_observations"] == 1
+        and account["risk"]["return_observations"] == 0
+        and account["risk"]["annualized_volatility"] is None
+        and account["risk"]["max_drawdown"] == pytest.approx(0.0)
+        and account["risk"]["gate_status"] == "insufficient_history"
+        and not account["risk"]["gate_passed"]
+        for account in payload["accounts"]
+    )
     assert "订单生命周期 CSV" in document
     assert "收益归因 CSV" in document
     assert "收益归因（元）" in document
+    assert "风险仪表盘" in document
+    assert "历史不足" in document
+    assert "亏损天数" in document
+    assert "60 个收益观察" in document
+    assert "最大回撤不差于 -15%" in document
+    assert "年化波动率不高于 30%" in document
+    assert "最长连续亏损不超过 5 天" in document
+    assert "不授权投入真实资金" in document
 
 
 def test_paper_report_keeps_archive_identity_and_recovers_missing_file(tmp_path: Path) -> None:
@@ -75,6 +103,33 @@ def test_paper_report_keeps_archive_identity_and_recovers_missing_file(tmp_path:
     assert second.archive_json.read_text(encoding="utf-8") == "preserved archive"
     assert second.archive_html == first.archive_html
     assert second.archive_html.exists()
+
+
+def test_paper_report_archive_identity_includes_the_risk_policy(tmp_path: Path) -> None:
+    paths, result = _initialized_result(tmp_path)
+    first = write_paper_report(result, paths)
+    stricter = replace(DEFAULT_PAPER_RISK_POLICY, maximum_drawdown=0.10)
+
+    second = write_paper_report(result, paths, risk_policy=stricter)
+
+    assert second.archive_json != first.archive_json
+    second_payload = json.loads(second.archive_json.read_text(encoding="utf-8"))
+    assert second_payload["risk_policy"]["maximum_drawdown"] == pytest.approx(0.10)
+
+
+def test_paper_report_archive_identity_includes_the_report_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, result = _initialized_result(tmp_path)
+    first = write_paper_report(result, paths)
+    monkeypatch.setattr(paper_report_module, "PAPER_REPORT_SCHEMA_VERSION", 3)
+
+    second = write_paper_report(result, paths)
+
+    assert second.archive_json != first.archive_json
+    second_payload = json.loads(second.archive_json.read_text(encoding="utf-8"))
+    assert second_payload["report_schema_version"] == 3
 
 
 def test_paper_report_rejects_unsafe_portfolio_output_name(tmp_path: Path) -> None:
