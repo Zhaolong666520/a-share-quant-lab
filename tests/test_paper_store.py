@@ -296,6 +296,35 @@ def test_rebuild_matches_cached_state_and_tampering_fails_audit(tmp_path: Path) 
             store.audit_portfolio("default")
 
 
+def test_audit_rejects_self_consistent_nonpositive_valuation_open(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    first_account, second_account, first_step, second_step, context = (
+        _accounts_and_initial_steps()
+    )
+    first_events = list(first_step.events)
+    valuation_index = next(
+        index
+        for index, event in enumerate(first_events)
+        if event.event_type == "VALUATION"
+    )
+    first_events[valuation_index] = replace(
+        first_events[valuation_index],
+        payload={"open_price": 0.0},
+    )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+        store.initialize_portfolio(
+            (first_account, second_account),
+            (replace(first_step, events=tuple(first_events)), second_step),
+            context,
+            batch_id="invalid-open",
+        )
+
+        with pytest.raises(PaperAuditError, match="估值开盘价"):
+            store.audit_portfolio("default")
+
+
 def test_store_persists_and_rebuilds_deferred_order_attempt_count(tmp_path: Path) -> None:
     database = tmp_path / "finance_lab.duckdb"
     history = _history(121)

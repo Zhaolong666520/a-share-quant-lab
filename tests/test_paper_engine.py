@@ -87,6 +87,27 @@ def test_initial_signal_creates_order_filled_at_next_bar_open() -> None:
     )
 
 
+def test_valuation_events_capture_the_verified_open_for_attribution() -> None:
+    initial_history = _history([float(value) for value in range(100, 221)])
+    account = _momentum_account(
+        initial_history.iloc[-1]["trade_date"].date(),
+        LedgerConfig(commission_bps=0.0, minimum_commission=0.0, slippage_bps=0.0),
+    )
+
+    created = initialize_account(account, initial_history)
+    advanced_history = _history([float(value) for value in range(100, 222)])
+    advanced = advance_one_bar(account, created.state, advanced_history)
+
+    initial_valuation = next(
+        event for event in created.events if event.event_type == "VALUATION"
+    )
+    next_valuation = next(
+        event for event in advanced.events if event.event_type == "VALUATION"
+    )
+    assert initial_valuation.payload["open_price"] == pytest.approx(220.0)
+    assert next_valuation.payload["open_price"] == pytest.approx(221.0)
+
+
 def test_insufficient_cash_defers_buy_order_for_another_opening_attempt() -> None:
     initial_history = _history([float(value) for value in range(100, 221)])
     account = _momentum_account(

@@ -299,7 +299,7 @@ def _signal_events(
 def initialize_account(account: PaperAccount, history: pd.DataFrame) -> EngineStep:
     """Create the forward-only starting state at the latest available close."""
     validate_ledger_config(account.ledger_config)
-    trade_date, _raw_open, close = _current_bar(history)
+    trade_date, raw_open, close = _current_bar(history)
     if trade_date != account.created_market_date:
         raise ValueError("账户创建日期必须等于初始化行情的最新日期")
     initial_state = _initial_state(account, trade_date, close)
@@ -313,7 +313,12 @@ def initialize_account(account: PaperAccount, history: pd.DataFrame) -> EngineSt
             "strategy": account.strategy.name,
         },
     )
-    valuation_event = _event("VALUATION", trade_date, initial_state)
+    valuation_event = _event(
+        "VALUATION",
+        trade_date,
+        initial_state,
+        payload={"open_price": raw_open},
+    )
     final_state, signal_events = _signal_events(
         account,
         initial_state,
@@ -587,7 +592,12 @@ def advance_one_bar(
             )
         )
 
-    valuation_event = _event("VALUATION", trade_date, state_after_payment)
+    valuation_event = _event(
+        "VALUATION",
+        trade_date,
+        state_after_payment,
+        payload={"open_price": raw_open},
+    )
     state_after_entitlement = state_after_payment
     entitlement_events: list[PaperEventDraft] = []
     for distribution in sorted(cash_distributions, key=lambda item: item.action_id):

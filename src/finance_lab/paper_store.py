@@ -924,7 +924,15 @@ class PaperStore:
             if not math.isclose(drawdown, expected_drawdown, rel_tol=0.0, abs_tol=1e-10):
                 raise PaperAuditError(f"模拟账户 {account_id} 的回撤对账失败")
 
-            if str(event_type) == "SIGNAL_GENERATED":
+            if str(event_type) == "VALUATION":
+                open_price = payload.get("open_price")
+                if open_price is not None:
+                    parsed_open = _as_float(open_price, "估值开盘价")
+                    if not math.isfinite(parsed_open) or parsed_open <= 0.0:
+                        raise PaperAuditError(
+                            f"模拟账户 {account_id} 的估值开盘价无效"
+                        )
+            elif str(event_type) == "SIGNAL_GENERATED":
                 target = payload.get("target_position")
                 if target is not None:
                     if type(target) is not int or target not in {0, 1}:

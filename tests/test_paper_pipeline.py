@@ -200,6 +200,20 @@ def test_paper_run_processes_each_unseen_bar_once_and_then_becomes_no_op(
         runs_before_retry = connection.execute("SELECT COUNT(*) FROM paper_runs").fetchone()
     assert filled_orders == (2,)
     assert runs_before_retry == (8,)
+    report_payload = json.loads(
+        (paths.outputs / "default_paper_latest_report.json").read_text(encoding="utf-8")
+    )
+    assert report_payload["attribution_rows"] == 8
+    state_by_account = {state.account_id: state for state in result.states}
+    assert all(
+        account["metrics"]["attribution_total_pnl"]
+        == pytest.approx(state_by_account[account["account_id"]].equity - 100_000.0)
+        and account["metrics"]["attribution_residual"] == pytest.approx(0.0, abs=1e-8)
+        for account in report_payload["accounts"]
+    )
+    attribution_files = list(paths.outputs.glob("*_attribution.csv"))
+    assert len(attribution_files) == 2
+    assert all("residual" in path.read_text(encoding="utf-8-sig") for path in attribution_files)
 
     retried = paper_run_portfolio(root=tmp_path, as_of_date=latest_date)
 
@@ -377,6 +391,32 @@ def test_paper_status_is_read_only_and_missing_portfolio_is_explicit(tmp_path: P
     assert status.status == "status"
     assert status.states == initialized.states
     assert paths.database.stat().st_mtime_ns == before_mtime
+
+
+def test_paper_status_survives_an_unprocessed_append_only_market_bar(tmp_path: Path) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    as_of_date = prices["trade_date"].max().date()
+    initialized = paper_init_portfolio(root=tmp_path, as_of_date=as_of_date)
+    _append_rising_bars(paths, prices, count=1)
+
+    status = paper_status_portfolio(root=tmp_path)
+
+    assert status.status == "status"
+    assert status.states == initialized.states
+
+
+def test_paper_status_uses_hash_chained_open_evidence_without_curated_file(
+    tmp_path: Path,
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    as_of_date = prices["trade_date"].max().date()
+    initialized = paper_init_portfolio(root=tmp_path, as_of_date=as_of_date)
+    (paths.curated / "sh_510300.parquet").unlink()
+
+    status = paper_status_portfolio(root=tmp_path)
+
+    assert status.status == "status"
+    assert status.states == initialized.states
 
 
 def test_report_failure_does_not_rollback_committed_paper_ledger(
