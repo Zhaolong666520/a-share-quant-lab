@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import finance_lab.paper_report as paper_report_module
@@ -37,7 +38,7 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     payload = json.loads(outputs.archive_json.read_text(encoding="utf-8"))
     document = outputs.archive_html.read_text(encoding="utf-8")
     assert len(payload["accounts"]) == 2
-    assert payload["report_schema_version"] == 3
+    assert payload["report_schema_version"] == 4
     assert payload["risk_policy"] == {
         "minimum_return_observations": 60,
         "maximum_drawdown": 0.15,
@@ -78,6 +79,30 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
         "includes_cash_distributions": False,
         "includes_share_adjustments": False,
     }
+    assert payload["observation_progress"] == {
+        "start_date": result.states[0].last_trade_date.isoformat(),
+        "end_date": result.states[0].last_trade_date.isoformat(),
+        "valuation_observations": 1,
+        "return_observations": 0,
+        "milestone_targets": [20, 60, 120, 252],
+        "reached_milestones": [],
+        "next_milestone": 20,
+        "observations_to_next_milestone": 20,
+        "minimum_evidence_observations": 60,
+        "minimum_window_reached": False,
+        "minimum_window_completion": pytest.approx(0.0),
+        "stage": "initial_observation",
+        "scope": "sample_progress_only",
+        "authorizes_real_money": False,
+    }
+    assert payload["observation_history_rows"] == 2
+    observation_history = pd.read_csv(outputs.observation_history_csv)
+    assert len(observation_history) == 2
+    assert set(observation_history["account_id"]) == {
+        state.account_id for state in result.states
+    }
+    assert observation_history["return_observations"].eq(0).all()
+    assert observation_history["account_total_return"].eq(0.0).all()
     assert all(
         account["relative_performance"]["account_total_return"]
         == pytest.approx(0.0)
@@ -120,6 +145,11 @@ def test_paper_report_writes_safe_auditable_outputs(tmp_path: Path) -> None:
     assert "不复权价格基准" in document
     assert "跑赢现金" in document
     assert "百分点差" in document
+    assert "前向观察进度" in document
+    assert "下一个检查点" in document
+    assert "20 个收益观察" in document
+    assert "样本积累进度不等于策略有效" in document
+    assert "逐日观察历史 CSV" in document
 
 
 def test_paper_report_keeps_archive_identity_and_recovers_missing_file(tmp_path: Path) -> None:
@@ -146,6 +176,20 @@ def test_paper_report_archive_identity_includes_the_risk_policy(tmp_path: Path) 
     assert second.archive_json != first.archive_json
     second_payload = json.loads(second.archive_json.read_text(encoding="utf-8"))
     assert second_payload["risk_policy"]["maximum_drawdown"] == pytest.approx(0.10)
+
+
+def test_paper_report_observation_copy_uses_configured_minimum_window(
+    tmp_path: Path,
+) -> None:
+    paths, result = _initialized_result(tmp_path)
+    policy = replace(DEFAULT_PAPER_RISK_POLICY, minimum_return_observations=30)
+
+    outputs = write_paper_report(result, paths, risk_policy=policy)
+
+    document = outputs.archive_html.read_text(encoding="utf-8")
+    payload = json.loads(outputs.archive_json.read_text(encoding="utf-8"))
+    assert "最小 30 日观察窗完成度" in document
+    assert payload["observation_progress"]["minimum_evidence_observations"] == 30
 
 
 def test_paper_report_archive_identity_includes_the_report_schema(

@@ -22,6 +22,11 @@ from finance_lab.paper_benchmark import (
     calculate_shared_price_benchmark,
 )
 from finance_lab.paper_models import PaperDataContext, PaperOperationResult, validate_portfolio_id
+from finance_lab.paper_observation import (
+    PaperObservationProgress,
+    build_forward_observation_history,
+    calculate_observation_progress,
+)
 from finance_lab.paper_risk import (
     DEFAULT_PAPER_RISK_POLICY,
     PaperRiskPolicy,
@@ -30,7 +35,7 @@ from finance_lab.paper_risk import (
 from finance_lab.paper_store import PaperPortfolioSnapshot, PaperStore
 from finance_lab.validation import assert_valid_daily_prices
 
-PAPER_REPORT_SCHEMA_VERSION = 3
+PAPER_REPORT_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class PaperReportPaths:
     archive_html: Path
     archive_json: Path
     daily_csv: Path
+    observation_history_csv: Path
     trades_csv: Path
     order_events_csv: Path
     attribution_csv: Path
@@ -53,6 +59,7 @@ class PaperReportPaths:
             self.archive_html,
             self.archive_json,
             self.daily_csv,
+            self.observation_history_csv,
             self.trades_csv,
             self.order_events_csv,
             self.attribution_csv,
@@ -192,6 +199,21 @@ def write_paper_report(
         """,
         [portfolio_id],
     )
+    initial_cash_by_account = {
+        str(account["account_id"]): _number(
+            account["ledger_config"]["initial_cash"], "初始资金"
+        )
+        for account in snapshot["accounts"]
+    }
+    observation_progress = calculate_observation_progress(
+        daily,
+        minimum_evidence_observations=risk_policy.minimum_return_observations,
+    )
+    observation_history = build_forward_observation_history(
+        daily,
+        initial_cash_by_account=initial_cash_by_account,
+        minimum_evidence_observations=risk_policy.minimum_return_observations,
+    )
     payload = _report_payload(
         result,
         snapshot,
@@ -201,12 +223,17 @@ def write_paper_report(
         attribution,
         distributions,
         share_adjustments,
+        observation_progress,
+        observation_history,
         risk_policy,
     )
     stem = _archive_stem(portfolio_id, snapshot, risk_policy)
     archive_html = _output_path(paths, f"{stem}_report.html")
     archive_json = _output_path(paths, f"{stem}_report.json")
     daily_csv = _output_path(paths, f"{stem}_daily.csv")
+    observation_history_csv = _output_path(
+        paths, f"{stem}_observation_history.csv"
+    )
     trades_csv = _output_path(paths, f"{stem}_trades.csv")
     order_events_csv = _output_path(paths, f"{stem}_order_events.csv")
     attribution_csv = _output_path(paths, f"{stem}_attribution.csv")
@@ -219,6 +246,7 @@ def write_paper_report(
         archive_html=archive_html,
         archive_json=archive_json,
         daily_csv=daily_csv,
+        observation_history_csv=observation_history_csv,
         trades_csv=trades_csv,
         order_events_csv=order_events_csv,
         attribution_csv=attribution_csv,
@@ -233,6 +261,7 @@ def write_paper_report(
         payload,
         chart_png.name,
         daily_csv.name,
+        observation_history_csv.name,
         trades_csv.name,
         order_events_csv.name,
         attribution_csv.name,
@@ -243,6 +272,12 @@ def write_paper_report(
         _write_json(archive_json, payload)
     if not daily_csv.exists():
         daily.to_csv(daily_csv, index=False, encoding="utf-8-sig")
+    if not observation_history_csv.exists():
+        observation_history.to_csv(
+            observation_history_csv,
+            index=False,
+            encoding="utf-8-sig",
+        )
     if not trades_csv.exists():
         trades.to_csv(trades_csv, index=False, encoding="utf-8-sig")
     if not order_events_csv.exists():
@@ -383,6 +418,8 @@ def _report_payload(
     attribution: pd.DataFrame,
     distributions: pd.DataFrame,
     share_adjustments: pd.DataFrame,
+    observation_progress: PaperObservationProgress,
+    observation_history: pd.DataFrame,
     risk_policy: PaperRiskPolicy,
 ) -> dict[str, object]:
     forward_benchmark = calculate_shared_price_benchmark(daily)
@@ -506,6 +543,7 @@ def _report_payload(
             "scope": "extended_paper_observation_only",
             "authorizes_real_money": False,
         },
+        "observation_progress": asdict(observation_progress),
         "forward_benchmark": asdict(forward_benchmark),
         "portfolio_id": result.portfolio_id,
         "operation_status": result.status,
@@ -513,6 +551,7 @@ def _report_payload(
         "data_context": _data_context_payload(result.data_context),
         "accounts": accounts,
         "daily_rows": int(len(daily)),
+        "observation_history_rows": int(len(observation_history)),
         "trade_rows": int(len(trades)),
         "order_event_rows": int(len(order_events)),
         "attribution_rows": int(len(attribution)),
@@ -574,6 +613,7 @@ def _html_document(
     payload: dict[str, object],
     chart_name: str,
     daily_csv_name: str,
+    observation_history_csv_name: str,
     trades_csv_name: str,
     order_events_csv_name: str,
     attribution_csv_name: str,
@@ -582,10 +622,33 @@ def _html_document(
 ) -> str:
     raw_accounts = payload["accounts"]
     raw_risk_policy = payload["risk_policy"]
+    raw_observation_progress = payload["observation_progress"]
     raw_forward_benchmark = payload["forward_benchmark"]
     assert isinstance(raw_accounts, list)
     assert isinstance(raw_risk_policy, dict)
+    assert isinstance(raw_observation_progress, dict)
     assert isinstance(raw_forward_benchmark, dict)
+    stage_labels = {
+        "initial_observation": "初始观察",
+        "twenty_day_observation": "达到 20 日观察",
+        "sixty_day_observation": "达到 60 日观察",
+        "one_hundred_twenty_day_observation": "达到 120 日观察",
+        "one_year_observation": "达到约一交易年观察",
+    }
+    raw_reached = raw_observation_progress["reached_milestones"]
+    assert isinstance(raw_reached, (list, tuple))
+    reached_text = "、".join(str(int(item)) for item in raw_reached) or "尚无"
+    next_milestone = raw_observation_progress["next_milestone"]
+    if next_milestone is None:
+        next_checkpoint_text = "固定检查点已全部达到"
+    else:
+        next_checkpoint_text = (
+            f"下一个检查点为 {int(next_milestone)} 个收益观察，尚需 "
+            f"{int(raw_observation_progress['observations_to_next_milestone'])} 个"
+        )
+    minimum_evidence_observations = int(
+        raw_observation_progress["minimum_evidence_observations"]
+    )
     risk_policy_summary = (
         f"至少 {int(raw_risk_policy['minimum_return_observations'])} 个收益观察；"
         f"最大回撤不差于 -{float(raw_risk_policy['maximum_drawdown']):.0%}；"
@@ -732,6 +795,15 @@ img {{ max-width: 100%; }}
   <th>权益</th><th>累计收益</th><th>当前回撤</th><th>成交边数</th><th>延期/过期/取消</th><th>待到账分红</th>
 <th>累计分红到账</th><th>份额调整次数</th><th>待成交订单</th></tr></thead>
 <tbody>{''.join(account_rows)}</tbody></table>
+<h2>前向观察进度</h2>
+<p class="warning">样本积累进度不等于策略有效，也不授权投入真实资金。</p>
+<p class="note">共同前向期间 {html.escape(str(raw_observation_progress['start_date']))} 至
+{html.escape(str(raw_observation_progress['end_date']))}，已有
+{int(raw_observation_progress['return_observations'])} 个收益观察；当前阶段：
+{html.escape(stage_labels[str(raw_observation_progress['stage'])])}。
+固定里程碑为 20、60、120、252 个收益观察；已达到：{html.escape(reached_text)}；
+{html.escape(next_checkpoint_text)}。最小 {minimum_evidence_observations} 日观察窗完成度为
+{float(raw_observation_progress['minimum_window_completion']):.0%}。</p>
 <h2>风险仪表盘</h2>
 <p class="warning">固定门槛只用于判断是否值得延长模拟观察，不授权投入真实资金，
 也不证明策略未来盈利。</p>
@@ -757,6 +829,7 @@ img {{ max-width: 100%; }}
 <tbody>{''.join(attribution_rows)}</tbody></table>
 <img src="{html.escape(chart_name)}" alt="两个模拟账户的净值和回撤图">
   <p><a href="{html.escape(daily_csv_name)}">逐日权益 CSV</a>；
+  <a href="{html.escape(observation_history_csv_name)}">逐日观察历史 CSV</a>；
   <a href="{html.escape(trades_csv_name)}">成交明细 CSV</a>；
   <a href="{html.escape(order_events_csv_name)}">订单生命周期 CSV</a>；
   <a href="{html.escape(attribution_csv_name)}">收益归因 CSV</a>；
