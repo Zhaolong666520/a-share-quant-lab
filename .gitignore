@@ -12,10 +12,13 @@ package_verify_*/
 data/raw/
 data/curated/
 data/*.duckdb
+data/paper_trading.lock
 outputs/*.png
 outputs/*.html
 outputs/*.json
 outputs/*.csv
 outputs/*.zip
+outputs/paper_automation_logs/
+outputs/paper_automation_runs/
 !data/.gitkeep
 !outputs/.gitkeep
