@@ -7,6 +7,7 @@ from datetime import date
 
 from finance_lab.config import get_paths, load_instruments
 from finance_lab.ledger import LedgerConfig
+from finance_lab.paper_automation import run_paper_daily_automation
 from finance_lab.paper_pipeline import (
     PaperPortfolioNotFound,
     paper_init_portfolio,
@@ -150,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     paper_status = subparsers.add_parser("paper-status", help="只读审计模拟盘当前状态")
     paper_status.add_argument("--portfolio", default="default")
+
+    paper_daily = subparsers.add_parser(
+        "paper-daily",
+        help="执行一次带成功/失败留证的每日模拟盘流程",
+    )
+    paper_daily.add_argument("--portfolio", default="default")
+    paper_daily.add_argument("--start", type=_parse_date, default=date(2018, 1, 1))
+    paper_daily.add_argument("--as-of", type=_parse_date, default=date.today())
+    paper_daily.add_argument("--stale-after-business-days", type=int, default=3)
 
     account = subparsers.add_parser("account", help="对可交易标的运行现金和整数份额账本")
     _add_account_arguments(account, include_symbol=True)
@@ -339,6 +349,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"模拟盘报告已生成：{result.report_path}")
             _print_json(_paper_operation_payload(result))
             return 0
+        if args.command == "paper-daily":
+            automation = run_paper_daily_automation(
+                portfolio_id=args.portfolio,
+                start_date=args.start,
+                as_of_date=args.as_of,
+                stale_after_business_days=args.stale_after_business_days,
+            )
+            _print_json(automation.payload)
+            if automation.succeeded:
+                print(f"每日模拟盘自动运行完成：{automation.latest_path}")
+            else:
+                print(
+                    f"每日模拟盘自动运行失败：{automation.payload['failed_step']}",
+                    file=sys.stderr,
+                )
+            return automation.exit_code
         if args.command == "account":
             report, account_payload = account_backtest_symbol(
                 args.symbol,
