@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-0.8.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
+[![Version](https://img.shields.io/badge/version-0.9.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
 [![License](https://img.shields.io/github/license/Zhaolong666520/a-share-quant-lab)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Zhaolong666520/a-share-quant-lab?style=social)](https://github.com/Zhaolong666520/a-share-quant-lab/stargazers)
 
@@ -17,7 +17,7 @@
 ## 为什么值得收藏
 
 - **拒绝未来函数**：信号至少延迟到下一交易日执行，并用逐行检查守住边界。
-- **数据有身份证**：每份正式数据都有 SHA-256、数据集 ID、来源、采集时间、复权方式和陈旧状态。
+- **数据有身份证**：每份正式数据都有 SHA-256、数据集 ID、来源、采集时间、复权方式、陈旧状态和日历快照。
 - **不只看一条漂亮曲线**：固定比较买入持有、双均线和时间序列动量，再做样本外与多类压力测试。
 - **按真实账户约束记账**：现金、100 份整手、最低佣金、卖出税费和滑点逐日对账。
 - **亏损结果也保留**：项目明确禁止删除落后基准的实验，也不把合成数据冒充真实行情。
@@ -36,13 +36,14 @@
 | --- | --- |
 | 数据接入 | AKShare 获取 A 股指数与 ETF 日线；BaoStock 用于抽样核对 |
 | 数据存储 | 不可变原始快照、规范 Parquet、DuckDB |
-| 数据健康 | 重复日期、OHLC 关系、空值、异常间隔、陈旧状态、来源失败 |
+| 数据健康 | 重复日期、OHLC 关系、空值、异常间隔、交易日陈旧度、来源失败 |
 | 基础回测 | 买入持有、双均线与时间序列动量；信号次日执行并扣除成本 |
 | 策略对比 | 三种固定规则共用数据、切分、成本和基准，不自动挑选历史赢家 |
 | 稳健性 | 固定切分、walk-forward、成本压力、参数热力图 |
 | 执行压力 | 额外延迟与事后日线阻塞代理；受阻订单保留原仓位 |
 | 账户账本 | 现金、整手、最低佣金、卖出费用、滑点和逐日对账 |
-| 研究产物 | 中文 HTML、净值图、逐笔 CSV、机器可读 JSON |
+| 前向模拟盘 | 固定双账户、下一根日线开盘模拟、事件哈希链、收益归因、风险/基准、滚动观察与失败留证自动化 |
+| 研究产物 | 中文 HTML、净值图、成交/订单/归因 CSV、机器可读 JSON |
 
 ## 一个诚实的结果示例
 
@@ -87,6 +88,7 @@ cd a-share-quant-lab
 | 6. 执行可行性 | [`第六课`](docs/第六课.md) | `run_execution_test.cmd` | 延迟和受阻会改变多少结果？ |
 | 7. 数据与账本 | [`第七课`](docs/第七课.md) | `run_data_health.cmd` → `run_account.cmd` | 数据身份和账户余额能否逐项对上？ |
 | 8. 策略对比 | [`第八课`](docs/第八课.md) | `run_strategy_compare.cmd` | 不同固定规则在同一把尺子下有何差异？ |
+| 9. 前向模拟盘 | [`第九课`](docs/第九课.md) | `run_paper_trading.cmd` | 今天的信号何时才有资格模拟成交？ |
 
 <details>
 <summary><strong>展开：真实数据与全部命令</strong></summary>
@@ -110,6 +112,10 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli manifest
 .\.venv\Scripts\python.exe -m finance_lab.cli account --symbol sh.510300
 .\.venv\Scripts\python.exe -m finance_lab.cli compare-all --split-date 2023-01-01
+.\.venv\Scripts\python.exe -m finance_lab.cli paper-init
+.\.venv\Scripts\python.exe -m finance_lab.cli paper-run
+.\.venv\Scripts\python.exe -m finance_lab.cli paper-status
+.\.venv\Scripts\python.exe -m finance_lab.cli paper-daily
 ```
 
 ### 输出文件
@@ -141,7 +147,7 @@ a-share-quant-lab/
 ├─ config/                 标的与账户配置
 ├─ data/raw/               原始快照（不进入 Git）
 ├─ data/curated/           规范数据（不进入 Git）
-├─ docs/                   八节中文课程与数据说明
+├─ docs/                   九节中文课程与数据说明
 ├─ experiments/            固定参数、假设和全部结论
 ├─ outputs/                HTML / PNG / JSON / CSV
 ├─ research/               研究资料与新假设
@@ -156,16 +162,31 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 
 - 目前以日线教学为主，不处理分钟、逐笔和实时行情。
 - 执行阻塞是收盘后可知的事后日线压力代理，不是开盘可知的交易所规则。
-- ETF 使用不复权数据，账户模型尚未处理分红、除权现金流、部分成交、排队和市场冲击。
-- 陈旧度按工作日近似，尚未接入交易所完整交易日历。
+- ETF 使用不复权数据；现金分红与同代码份额调整仅在用户提供完整、不可变公告快照时入账。不完整或迟到快照会被拒绝，零碎份额与跨代码派送不会被猜测。资金不足买单最多尝试三个开盘；部分成交、排队和市场冲击尚未建模。
+- 陈旧度使用随项目发布的上交所 2022–2026 年休市快照；超出覆盖期会明确改为周一至周五的保守估算，前向模拟盘会停止。
 - AKShare 与 BaoStock 是研究级公共接口，不提供生产级稳定性保证。
 - 买入持有、双均线和时间序列动量都只是教学基准，不能据此直接买卖。
+- 模拟盘只从首次 `paper-init` 之后追加记录；不会拿历史行情回填“已发生”的模拟收益。
+- 模拟盘收益归因是会计桥接，不是因果模型：交易时点项只比较“当日开盘交易”和“不交易”，份额调整桥接项也不是策略收益。
+- 模拟盘风险门禁采用公开固定的教学阈值，只判断是否值得延长模拟观察；即使通过也不授权真实交易、不证明未来盈利。
+- 前向标的基准只表示同日期的不复权收盘价变化，不包含分红或份额调整；账户与基准的差异是百分点差，不是 alpha。
+- 逐日观察历史只从已提交估值事件重建；20/60/120/252 日里程碑衡量样本积累，不代表策略有效或可投入真实资金。
+- `paper-daily` 会依次更新数据、检查健康状态并运行模拟盘；每次成功或失败都会留下 JSON 与日志，失败返回非零退出码。Windows 计划任务只能在稳定项目目录安装，不能指向 `.worktrees`。
 
 ## 路线图
 
-- [ ] 交易所交易日历与节假日感知的数据健康检查
-- [ ] 分红、除权和现金分配账本
+- [x] 上交所交易日历与节假日感知的数据健康检查（2022–2026 快照）
+- [x] 可审计 ETF 现金分红权益与到账账本（本地公告快照）
+- [x] 同代码且结果为整数份的 ETF 份额调整账本
+- [ ] 跨代码派送及需要登记机构分配的零碎份额
 - [x] 更多不依赖“最佳参数”的基准策略（固定三策略对比）
+- [x] 本地前向模拟盘与可审计事件账本（不连接券商）
+- [x] 待成交订单延期、重试、反转取消和超限过期
+- [x] 逐日可对账的模拟盘收益归因与残差门禁
+- [x] 波动、回撤、连亏和仓位暴露风险仪表盘（仅限模拟观察门禁）
+- [x] 同期现金与标的价格基准对比及研究证据门禁
+- [x] 逐日前向观察历史与固定样本里程碑
+- [x] Windows 工作日自动运行、失败留证与可撤销计划任务
 - [ ] Linux/macOS 一键脚本与容器化环境
 - [ ] 可选的分钟线研究层（与日线证据链分离）
 
@@ -173,7 +194,7 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 
 ## 发布包
 
-`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.8.0.zip`。源码包不重新分发第三方行情，只保留空的 `data/` 与 `outputs/`，因此不能单独复现实验 006/007 的精确历史结果。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
+`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.9.0.zip`。源码包不重新分发第三方行情、DuckDB 模拟账户或用户输出，只保留空的 `data/` 与 `outputs/`；因此不能单独复现实验 006/007 的精确历史结果，也不会携带任何人的模拟盘记录。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
 
 ## 许可证与免责声明
 

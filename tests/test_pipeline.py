@@ -34,7 +34,9 @@ def test_walk_forward_pipeline_reads_curated_data_and_writes_report(tmp_path: Pa
     )
 
     assert report.exists()
-    assert int(payload["fold_count"]) >= 2
+    fold_count = payload["fold_count"]
+    assert isinstance(fold_count, int)
+    assert fold_count >= 2
     execution_checks = payload["execution_checks"]
     assert isinstance(execution_checks, dict)
     assert bool(execution_checks["passed"])
@@ -72,7 +74,9 @@ def test_parameter_pipeline_reads_curated_data_and_writes_report(tmp_path: Path)
     )
 
     assert report.exists()
-    assert int(payload["total_scenarios"]) == 4
+    total_scenarios = payload["total_scenarios"]
+    assert isinstance(total_scenarios, int)
+    assert total_scenarios == 4
     scenarios = payload["scenarios"]
     assert isinstance(scenarios, list)
     assert len(scenarios) == 4

@@ -4,12 +4,17 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import finance_lab.data_manifest as manifest_module
 from finance_lab.cli import build_parser
 from finance_lab.config import get_paths
-from finance_lab.data_manifest import generate_dataset_manifest, write_dataset_manifest_report
+from finance_lab.data_manifest import (
+    generate_dataset_manifest,
+    read_update_summary,
+    write_dataset_manifest_report,
+)
 from finance_lab.pipeline import data_health
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
@@ -69,6 +74,7 @@ def test_manifest_warns_about_staleness_mixed_sources_and_unadjusted_data(
     )
 
     item = manifest.files[0]
+    assert item.business_days_stale is not None
     assert item.business_days_stale > 2
     assert "stale_data" in item.warning_codes
     assert "mixed_sources" in item.warning_codes
@@ -118,6 +124,97 @@ def test_manifest_surfaces_latest_upstream_source_errors(tmp_path: Path) -> None
         "demo.000300": {"akshare": "temporary upstream failure"}
     }
     assert manifest.health_status == "warning"
+
+
+def test_manifest_uses_sse_holiday_snapshot_for_freshness(tmp_path: Path) -> None:
+    paths = get_paths(tmp_path)
+    prices = make_synthetic_daily_prices(periods=140)
+    prices["trade_date"] = pd.bdate_range(end="2026-02-13", periods=len(prices))
+    save_curated(prices, paths)
+
+    manifest = generate_dataset_manifest(paths, as_of_date=date(2026, 2, 24))
+
+    item = manifest.files[0]
+    assert item.business_days_stale == 1
+    assert "calendar_snapshot_out_of_range" not in item.warning_codes
+    assert manifest.freshness_method == "sse_holiday_snapshot_2022_2026"
+    assert len(manifest.freshness_calendar_sha256) == 64
+    assert manifest.freshness_calendar_coverage == "2022-01-01 至 2026-12-31"
+
+
+def test_manifest_warns_when_freshness_uses_calendar_fallback(tmp_path: Path) -> None:
+    paths = get_paths(tmp_path)
+    prices = make_synthetic_daily_prices(periods=140)
+    prices["trade_date"] = pd.bdate_range(end="2026-12-31", periods=len(prices))
+    save_curated(prices, paths)
+
+    manifest = generate_dataset_manifest(paths, as_of_date=date(2027, 1, 5))
+
+    assert "calendar_snapshot_out_of_range" in manifest.files[0].warning_codes
+    assert manifest.freshness_method == (
+        "sse_holiday_snapshot_2022_2026_with_weekday_fallback"
+    )
+
+
+def test_read_update_summary_preserves_successful_fallback_and_source_error(
+    tmp_path: Path,
+) -> None:
+    paths = get_paths(tmp_path)
+    (paths.outputs / "update_summary.json").write_text(
+        json.dumps(
+            {
+                "end": "2026-08-21",
+                "records": [
+                    {
+                        "symbol": "sh.510300",
+                        "rows": 3,
+                        "curated_file": "data/curated/sh_510300.parquet",
+                        "source_errors": {"akshare": "temporary upstream failure"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = read_update_summary(paths)
+
+    assert summary.parse_error is None
+    assert summary.end == "2026-08-21"
+    assert summary.records[0].symbol == "sh.510300"
+    assert summary.records[0].rows == 3
+    assert summary.records[0].curated_file == "data/curated/sh_510300.parquet"
+    assert summary.records[0].source_errors == {"akshare": "temporary upstream failure"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{",
+        "[]",
+        json.dumps({"records": {}}),
+        json.dumps({"records": [{"symbol": "sh.510300", "rows": 1, "source_errors": []}]}),
+        json.dumps({"records": [{"rows": 1}]}),
+    ],
+)
+def test_read_update_summary_degrades_malformed_content_without_crashing(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    paths = get_paths(tmp_path)
+    (paths.outputs / "update_summary.json").write_text(payload, encoding="utf-8")
+
+    summary = read_update_summary(paths)
+
+    assert summary.records == ()
+    assert summary.parse_error is not None
+
+
+def test_read_update_summary_handles_missing_file_explicitly(tmp_path: Path) -> None:
+    summary = read_update_summary(get_paths(tmp_path))
+
+    assert summary.end is None
+    assert summary.records == ()
 
 
 def test_manifest_degrades_malformed_update_summary_to_warning(tmp_path: Path) -> None:
@@ -230,6 +327,27 @@ def test_manifest_report_paths_distinguish_freshness_context(tmp_path: Path) -> 
 
     assert first.dataset_id == second.dataset_id
     assert first_paths != second_paths
+
+
+def test_manifest_report_paths_distinguish_calendar_snapshot(tmp_path: Path) -> None:
+    paths = get_paths(tmp_path)
+    prices = make_synthetic_daily_prices(periods=140)
+    save_curated(prices, paths)
+    last_date = prices["trade_date"].max().date()
+    first = generate_dataset_manifest(paths, as_of_date=last_date)
+    source = Path(__file__).resolve().parents[1] / "config" / "sse_trading_calendar.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["generated_at"] = "2026-09-01"
+    calendar_path = tmp_path / "config" / source.name
+    calendar_path.parent.mkdir(parents=True)
+    calendar_path.write_text(json.dumps(payload), encoding="utf-8")
+    second = generate_dataset_manifest(paths, as_of_date=last_date)
+
+    assert first.dataset_id == second.dataset_id
+    assert first.freshness_calendar_sha256 != second.freshness_calendar_sha256
+    assert write_dataset_manifest_report(first, paths) != write_dataset_manifest_report(
+        second, paths
+    )
 
 
 @pytest.mark.parametrize("stale_after_business_days", [-1, 1.5, True])

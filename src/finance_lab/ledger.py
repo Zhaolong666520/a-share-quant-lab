@@ -123,7 +123,7 @@ class AccountLedgerResult:
         }
 
 
-def _validate_config(config: LedgerConfig) -> None:
+def validate_ledger_config(config: LedgerConfig) -> None:
     finite_nonnegative = {
         "commission_bps": config.commission_bps,
         "minimum_commission": config.minimum_commission,
@@ -216,22 +216,23 @@ def _experiment_id(
     )
 
 
-def _commission(notional: float, config: LedgerConfig) -> float:
+def commission_for(notional: float, config: LedgerConfig) -> float:
     if notional <= 0:
         return 0.0
     return max(config.minimum_commission, notional * config.commission_bps / 10_000.0)
 
 
-def _affordable_shares(cash: float, execution_price: float, config: LedgerConfig) -> int:
+def affordable_shares(cash: float, execution_price: float, config: LedgerConfig) -> int:
     if cash <= config.minimum_commission or execution_price <= 0:
         return 0
-    rate = config.commission_bps / 10_000.0
-    by_rate = int(cash // (execution_price * (1.0 + rate) * config.lot_size))
-    by_minimum = int(
-        max(cash - config.minimum_commission, 0.0)
-        // (execution_price * config.lot_size)
-    )
-    return max(min(by_rate, by_minimum), 0) * config.lot_size
+    lots = int(cash // (execution_price * config.lot_size))
+    while lots > 0:
+        shares = lots * config.lot_size
+        notional = shares * execution_price
+        if notional + commission_for(notional, config) <= cash:
+            return shares
+        lots -= 1
+    return 0
 
 
 def _build_signal(
@@ -286,10 +287,10 @@ def _simulate(
         if target == 1 and shares == 0:
             action = "BUY"
             execution_price = raw_open * (1.0 + config.slippage_bps / 10_000.0)
-            quantity = _affordable_shares(cash, execution_price, config)
+            quantity = affordable_shares(cash, execution_price, config)
             if quantity > 0:
                 notional = quantity * execution_price
-                commission = _commission(notional, config)
+                commission = commission_for(notional, config)
                 cash -= notional + commission
                 shares += quantity
                 filled = True
@@ -300,7 +301,7 @@ def _simulate(
             execution_price = raw_open * (1.0 - config.slippage_bps / 10_000.0)
             quantity = shares
             notional = quantity * execution_price
-            commission = _commission(notional, config)
+            commission = commission_for(notional, config)
             sell_tax = notional * config.sell_tax_bps / 10_000.0
             cash += notional - commission - sell_tax
             shares = 0
@@ -423,7 +424,7 @@ def run_account_ledger(
 ) -> AccountLedgerResult:
     assert_valid_daily_prices(prices)
     effective_config = config or LedgerConfig()
-    _validate_config(effective_config)
+    validate_ledger_config(effective_config)
     if instrument_kind == "index":
         raise ValueError("指数本身不可直接交易，账户账本只能用于可交易标的")
     if instrument_kind not in {"etf", "stock"}:

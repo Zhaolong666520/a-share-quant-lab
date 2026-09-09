@@ -10,11 +10,33 @@ import pytest
 import finance_lab.pipeline as pipeline_module
 from finance_lab.cli import build_parser
 from finance_lab.config import get_paths
-from finance_lab.ledger import LedgerConfig, run_account_ledger
+from finance_lab.ledger import (
+    LedgerConfig,
+    affordable_shares,
+    commission_for,
+    run_account_ledger,
+    validate_ledger_config,
+)
 from finance_lab.ledger_report import write_account_ledger_report
 from finance_lab.pipeline import account_backtest_symbol
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
+
+
+def test_public_accounting_helpers_preserve_cash_and_lot_invariants() -> None:
+    config = LedgerConfig(
+        initial_cash=10_005.0,
+        lot_size=100,
+        commission_bps=3.0,
+        minimum_commission=5.0,
+    )
+
+    validate_ledger_config(config)
+    shares = affordable_shares(10_005.0, 100.0, config)
+    notional = shares * 100.0
+
+    assert shares % config.lot_size == 0
+    assert notional + commission_for(notional, config) <= 10_005.0
 
 
 def test_buy_hold_ledger_uses_cash_and_integer_lots() -> None:
