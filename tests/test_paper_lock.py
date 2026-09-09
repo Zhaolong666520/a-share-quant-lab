@@ -20,7 +20,11 @@ except PaperLockError as exc:
     print(str(exc))
     raise SystemExit(2)
 """
-    environment = {**os.environ, "PYTHONPATH": str(project_root / "src")}
+    environment = {
+        **os.environ,
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONPATH": str(project_root / "src"),
+    }
 
     holder_code = f"""
 import subprocess
@@ -32,6 +36,7 @@ with paper_run_lock(Path({str(lock_path)!r})):
     completed = subprocess.run(
         [sys.executable, "-c", {child_code!r}],
         capture_output=True,
+        encoding="utf-8",
         text=True,
         check=False,
     )
@@ -42,6 +47,7 @@ print(completed.stdout, end="")
     result = subprocess.run(
         [sys.executable, "-c", holder_code],
         capture_output=True,
+        encoding="utf-8",
         text=True,
         check=False,
         env=environment,
