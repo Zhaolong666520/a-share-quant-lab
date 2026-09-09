@@ -86,7 +86,7 @@ def test_public_accounting_helpers_preserve_cash_and_lot_invariants() -> None:
 
 - [ ] **Step 2: Run the new ledger test and confirm the import failure**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_ledger.py::test_public_accounting_helpers_preserve_cash_and_lot_invariants -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_ledger.py::test_public_accounting_helpers_preserve_cash_and_lot_invariants -v`
 Expected: FAIL because the three public helper names do not exist.
 
 - [ ] **Step 3: Rename the private helpers and update every legacy call site**
@@ -230,7 +230,7 @@ Also define `PaperAccount` with account ID, portfolio ID, symbol, instrument kin
 
 - [ ] **Step 6: Run targeted and legacy ledger tests**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_models.py tests/test_ledger.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_models.py tests/test_ledger.py -v`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -269,7 +269,7 @@ def test_future_prices_do_not_change_today_signal() -> None:
 
 - [ ] **Step 2: Run tests and confirm failure**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_engine.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_engine.py -v`
 Expected: FAIL because `paper_engine` does not exist.
 
 - [ ] **Step 3: Implement exact warmup and signal rules**
@@ -314,7 +314,7 @@ The transition order is fixed: pending order fill or skip, `VALUATION`, `SIGNAL_
 
 - [ ] **Step 6: Run engine tests**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_engine.py tests/test_ledger.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_engine.py tests/test_ledger.py -v`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -344,7 +344,7 @@ Use `msvcrt.locking` on Windows and `fcntl.flock` on POSIX. Keep the handle open
 
 - [ ] **Step 3: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_lock.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_lock.py -v`
 Expected: PASS.
 
 ```powershell
@@ -400,7 +400,7 @@ Audit config hash, ACCOUNT_CREATED payload, sequence continuity, event hash chai
 
 - [ ] **Step 7: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_store.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_store.py -v`
 Expected: PASS.
 
 ```powershell
@@ -443,7 +443,7 @@ The function must require configured kind `etf`, exact symbol `sh.510300`, summa
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_data_manifest.py tests/test_paper_pipeline.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_data_manifest.py tests/test_paper_pipeline.py -v`
 Expected: PASS.
 
 ```powershell
@@ -485,7 +485,7 @@ For each unseen date, slice history through that date, call `advance_one_bar` fo
 
 - [ ] **Step 6: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_pipeline.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_pipeline.py -v`
 Expected: PASS.
 
 ```powershell
@@ -522,7 +522,7 @@ Initialization and runs call the report writer only after the transaction closes
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_report.py tests/test_paper_pipeline.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_report.py tests/test_paper_pipeline.py -v`
 Expected: PASS.
 
 ```powershell
@@ -568,7 +568,7 @@ Read both scripts and assert command order, every native-call exit check, UTF-8 
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_cli.py -v`  
+Run: `.\.venv\Scripts\python.exe -m pytest tests/test_paper_cli.py -v`
 Expected: PASS.
 
 ```powershell
@@ -634,7 +634,7 @@ Expected: pytest, Ruff, and mypy pass; diff check is clean; only intentional bra
 
 - [ ] **Step 2: Verify the source package**
 
-Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version v0.9.0`  
+Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package_release.ps1 -Version v0.9.0`
 Expected: archive extraction tests pass and the script prints file count plus SHA-256.
 
 - [ ] **Step 3: Perform targeted safety review**

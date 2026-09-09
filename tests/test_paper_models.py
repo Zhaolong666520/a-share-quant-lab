@@ -43,4 +43,3 @@ def test_same_locked_parameters_have_same_hash_in_another_portfolio() -> None:
 def test_portfolio_id_rejects_unsafe_values(value: str) -> None:
     with pytest.raises(ValueError, match="账户组"):
         validate_portfolio_id(value)
-
