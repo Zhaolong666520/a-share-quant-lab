@@ -53,15 +53,31 @@
 
 ## 3 分钟开始
 
-### 方式一：Windows 双击运行
+离线演示会生成一份完整的 HTML 回测报告，不会连接行情接口，也不会读取你的账户信息。首次安装 Python 依赖仍需要访问软件包源。
+
+![离线合成数据演示：策略与买入持有基准](docs/assets/demo-equity.png)
+
+> 上图使用固定种子的合成数据，不是真实行情。20/60 双均线累计收益约为 41.96%，同期合成买入持有约为 91.33%；落后基准的结果也会完整保留。
+
+### Windows
 
 1. 安装 Python 3.11、3.12 或 3.13。
 2. 双击 `run_demo.cmd`。首次运行会创建 `.venv` 并安装依赖。
 3. 打开 `outputs\demo_000300_sma_report.html`。
 
-离线演示使用明确标记的合成数据，不需要行情网络，只用于理解指标和确认环境正常。
+### Linux / macOS
 
-### 方式二：PowerShell / CLI
+```sh
+git clone https://github.com/Zhaolong666520/a-share-quant-lab.git
+cd a-share-quant-lab
+sh run_demo.sh
+```
+
+脚本会选择 Python 3.11–3.13，创建 `.venv`，安装锁定依赖并生成同一份离线报告。macOS 可运行 `open outputs/demo_000300_sma_report.html`，Linux 桌面可运行 `xdg-open outputs/demo_000300_sma_report.html`。
+
+完整步骤和常见问题见 [`新手快速开始`](docs/快速开始.md)。
+
+### PowerShell / CLI
 
 ```powershell
 git clone https://github.com/Zhaolong666520/a-share-quant-lab.git

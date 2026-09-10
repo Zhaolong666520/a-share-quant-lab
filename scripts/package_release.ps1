@@ -53,6 +53,7 @@ function Remove-SafeTemporaryDirectory {
 }
 
 $RootFiles = @(
+    ".gitattributes",
     ".gitignore",
     "AGENTS.md",
     "CHANGELOG.md",
@@ -66,6 +67,7 @@ $RootFiles = @(
     "run_cost_stress.cmd",
     "run_data_health.cmd",
     "run_demo.cmd",
+    "run_demo.sh",
     "run_execution_test.cmd",
     "run_experiment.cmd",
     "run_parameter_test.cmd",
@@ -86,6 +88,7 @@ $SeventhLessonName = ([char]0x7B2C).ToString() + ([char]0x4E03).ToString() + ([c
 $EighthLessonName = ([char]0x7B2C).ToString() + ([char]0x516B).ToString() + ([char]0x8BFE).ToString() + ".md"
 $NinthLessonName = ([char]0x7B2C).ToString() + ([char]0x4E5D).ToString() + ([char]0x8BFE).ToString() + ".md"
 $RequiredArchivePaths = @(
+    ".gitattributes",
     (Join-Path "docs" $FourthLessonName),
     (Join-Path "docs" $FifthLessonName),
     (Join-Path "docs" $SixthLessonName),
@@ -105,6 +108,7 @@ $RequiredArchivePaths = @(
     ".github\workflows\ci.yml",
     "docs\assets\social-preview.jpg",
     "docs\assets\account-equity.png",
+    "docs\assets\demo-equity.png",
     "docs\releases\v0.8.0.md",
     "docs\releases\v0.9.0.md",
     "src\finance_lab\cost_sensitivity.py",
@@ -157,6 +161,8 @@ $RequiredArchivePaths = @(
     "tests\__init__.py",
     "tests\paper_helpers.py",
     "scripts\package_release.ps1",
+    "scripts\setup.sh",
+    "scripts\run_demo.sh",
     "scripts\run_parameter_test.ps1",
     "scripts\run_execution_test.ps1",
     "scripts\run_data_health.ps1",
@@ -175,6 +181,7 @@ $RequiredArchivePaths = @(
     "install_paper_daily_task.cmd",
     "uninstall_paper_daily_task.cmd",
     "run_paper_trading.cmd",
+    "run_demo.sh",
     "config\sse_trading_calendar.json",
     "config\cash_distribution_template.csv",
     "config\share_adjustment_template.csv",
