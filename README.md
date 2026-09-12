@@ -6,6 +6,8 @@
 [![License](https://img.shields.io/github/license/Zhaolong666520/a-share-quant-lab)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Zhaolong666520/a-share-quant-lab?style=social)](https://github.com/Zhaolong666520/a-share-quant-lab/stargazers)
 
+[简体中文](README.md) · [English quick start](docs/quickstart.en.md)
+
 ![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 
 一个面向初学者的、**可复现且可审计**的 A 股量化研究实验室。它不负责告诉你“明天买什么”，而是帮助你把数据来源、实验参数、交易成本、执行限制和现金账本逐项对清楚。

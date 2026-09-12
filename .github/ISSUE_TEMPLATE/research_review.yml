@@ -1,0 +1,72 @@
+name: Research or data review
+description: Flag possible look-ahead, provenance, cost, accounting, or reporting problems
+title: "[Review]: "
+labels: [research-integrity]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reviewing the evidence chain. Do not attach credentials, account details, or market data you are not allowed to redistribute.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Review category
+      options:
+        - Possible look-ahead or data leakage
+        - Data provenance, fingerprint, or freshness
+        - Trading costs or execution assumptions
+        - Cash, lot, dividend, or share accounting
+        - Selective reporting or reproducibility
+        - Other research-integrity concern
+    validations:
+      required: true
+
+  - type: input
+    id: artifact
+    attributes:
+      label: Affected artifact
+      description: Name the command, report, experiment, source file, or commit.
+      placeholder: experiments/008_forward_paper_trading.md or commit SHA
+    validations:
+      required: true
+
+  - type: textarea
+    id: concern
+    attributes:
+      label: What appears to be wrong?
+      description: Describe the observed behavior and why it may weaken the evidence chain.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction or evidence
+      description: Provide minimal steps, public references, checksums, or small synthetic examples.
+      placeholder: |
+        1. Run ...
+        2. Inspect ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected safeguard
+      description: Explain the check, failure mode, or disclosure you expected.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and did not find the same review.
+          required: true
+        - label: I did not attach credentials, account details, or restricted market data.
+          required: true
+        - label: I understand that disappointing or benchmark-lagging results must remain visible.
+          required: true

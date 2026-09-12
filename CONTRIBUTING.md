@@ -2,6 +2,8 @@
 
 感谢你愿意帮助 A-Share Quant Lab 变得更可靠。这个项目优先接受能够提升**可复现性、可审计性和教学清晰度**的改进。
 
+English-speaking contributors can start with the [`English quick start`](docs/quickstart.en.md). Issues and pull requests are welcome in either Chinese or English.
+
 ## 提交前
 
 1. 先搜索现有 Issue，确认问题尚未被讨论。
