@@ -1,6 +1,6 @@
 param(
     [ValidatePattern("^v[0-9]+(?:\.[0-9]+){0,2}$")]
-    [string]$Version = "v0.9.0"
+    [string]$Version = "v0.9.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,6 +113,7 @@ $RequiredArchivePaths = @(
     "docs\assets\demo-equity.png",
     "docs\releases\v0.8.0.md",
     "docs\releases\v0.9.0.md",
+    "docs\releases\v0.9.1.md",
     "src\finance_lab\cost_sensitivity.py",
     "src\finance_lab\parameter_sensitivity.py",
     "src\finance_lab\parameter_sensitivity_report.py",

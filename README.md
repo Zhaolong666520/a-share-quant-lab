@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Zhaolong666520/a-share-quant-lab/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-0.9.0-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
+[![Version](https://img.shields.io/badge/version-0.9.1-00B3A4)](https://github.com/Zhaolong666520/a-share-quant-lab/releases)
 [![License](https://img.shields.io/github/license/Zhaolong666520/a-share-quant-lab)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Zhaolong666520/a-share-quant-lab?style=social)](https://github.com/Zhaolong666520/a-share-quant-lab/stargazers)
 
@@ -205,14 +205,15 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 - [x] 同期现金与标的价格基准对比及研究证据门禁
 - [x] 逐日前向观察历史与固定样本里程碑
 - [x] Windows 工作日自动运行、失败留证与可撤销计划任务
-- [ ] Linux/macOS 一键脚本与容器化环境
+- [x] Linux/macOS 一键离线演示脚本
+- [ ] 容器化环境
 - [ ] 可选的分钟线研究层（与日线证据链分离）
 
 欢迎通过 [Issue](https://github.com/Zhaolong666520/a-share-quant-lab/issues) 提建议，或阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md) 提交 PR。尤其欢迎数据质量、未来信息、费用口径和边界条件方面的审查。
 
 ## 发布包
 
-`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.9.0.zip`。源码包不重新分发第三方行情、DuckDB 模拟账户或用户输出，只保留空的 `data/` 与 `outputs/`；因此不能单独复现实验 006/007 的精确历史结果，也不会携带任何人的模拟盘记录。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
+`scripts/package_release.ps1` 会生成 `a-share-quant-lab-source-v0.9.1.zip`。源码包不重新分发第三方行情、DuckDB 模拟账户或用户输出，只保留空的 `data/` 与 `outputs/`；因此不能单独复现实验 006/007 的精确历史结果，也不会携带任何人的模拟盘记录。请用实验记录中的数据集 ID 和 SHA-256 核对你依法取得的数据快照。
 
 ## 许可证与免责声明
 
