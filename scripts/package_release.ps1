@@ -108,6 +108,7 @@ $RequiredArchivePaths = @(
     ".github\workflows\ci.yml",
     ".github\ISSUE_TEMPLATE\research_review.yml",
     "docs\quickstart.en.md",
+    "docs\metrics-glossary.en.md",
     "docs\assets\social-preview.jpg",
     "docs\assets\account-equity.png",
     "docs\assets\demo-equity.png",
