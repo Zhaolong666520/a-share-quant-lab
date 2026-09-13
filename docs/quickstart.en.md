@@ -18,6 +18,8 @@ After a successful run, the `outputs/` directory contains:
 
 The current demo contains 899 deterministic synthetic observations. The 20/60-day moving-average strategy returns about 41.96%, while its synthetic buy-and-hold benchmark returns about 91.33%. These numbers only demonstrate reproducibility. Performance on synthetic data has no investment meaning.
 
+Use the [`backtest metrics glossary`](metrics-glossary.en.md) to interpret the report fields before comparing results.
+
 ## Prerequisites
 
 Install Python 3.11, 3.12, or 3.13. Python 3.12 is recommended.
@@ -94,4 +96,4 @@ The launcher prints the report path but does not force a browser to open. Open `
 
 ## Next step
 
-Read [`第一课`](第一课.md) to understand total return, maximum drawdown, and benchmarks. The lesson is currently in Chinese. Before using real data, also read the [`data notes`](数据说明.md) and preserve the project's provenance, fingerprint, freshness, and no-look-ahead safeguards.
+Keep the [`backtest metrics glossary`](metrics-glossary.en.md) beside the report. You can also read [`第一课`](第一课.md), which covers several of the same ideas in Chinese. Before using real data, read the [`data notes`](数据说明.md) and preserve the project's provenance, fingerprint, freshness, and no-look-ahead safeguards.
