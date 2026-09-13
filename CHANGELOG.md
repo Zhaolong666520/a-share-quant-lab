@@ -4,16 +4,18 @@
 
 ## [Unreleased]
 
+### Planned
+
+- 跨代码派送、登记机构零碎份额分配和完整的跨平台研究/自动化运行脚本。
+
+## [0.9.1] - 2026-09-13
+
 ### Added
 
 - Linux/macOS 离线演示入口、固定 LF 行尾和 Ubuntu/macOS CI 冒烟验证。
 - 面向零基础用户的跨平台快速开始教程与明确标注为合成数据的演示曲线。
 - 英文快速开始、双语贡献入口和研究完整性/数据质量审查 Issue 表单。
 - 不联网的仓库内 Markdown 链接检查，以及缺失目标的来源定位。
-
-### Planned
-
-- 跨代码派送、登记机构零碎份额分配和完整的跨平台研究/自动化运行脚本。
 
 ## [0.9.0] - 2026-09-09
 
@@ -87,7 +89,8 @@
 
 - 锁定兼容 Python 3.11–3.13 的 NumPy 版本，并让 CI 在依赖安装失败时立即中止。
 
-[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Zhaolong666520/a-share-quant-lab/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Zhaolong666520/a-share-quant-lab/releases/tag/v0.7.0
