@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_lab.atomic_io import write_text_atomic
 from finance_lab.backtest import run_backtest
 from finance_lab.config import Instrument, ProjectPaths, get_paths, load_instruments
 from finance_lab.cost_sensitivity import run_cost_sensitivity
@@ -113,7 +114,11 @@ def update_market_data(
         "records": [asdict(record) for record in records],
     }
     output = paths.outputs / "update_summary.json"
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text_atomic(
+        output,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return payload
 
 

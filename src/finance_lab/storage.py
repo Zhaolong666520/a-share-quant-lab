@@ -1,35 +1,62 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
+from finance_lab.atomic_io import write_parquet_atomic, write_parquet_immutable
 from finance_lab.config import ProjectPaths
 from finance_lab.validation import assert_valid_daily_prices
 
 
 def _safe_symbol(symbol: str) -> str:
-    return symbol.replace(".", "_").replace("/", "_")
+    return _safe_path_component(symbol, label="symbol").replace(".", "_")
+
+
+def _safe_path_component(value: str, *, label: str) -> str:
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 128
+        or value in {".", ".."}
+        or any(not (character.isalnum() or character in "._-") for character in value)
+    ):
+        raise ValueError(f"{label} 含有不安全的路径字符")
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"COM{number}" for number in range(1, 10))
+    reserved.update(f"LPT{number}" for number in range(1, 10))
+    if value.split(".", maxsplit=1)[0].upper() in reserved:
+        raise ValueError(f"{label} 是保留的路径名称")
+    return value
+
+
+def _contained_path(base: Path, *parts: str) -> Path:
+    resolved_base = base.resolve()
+    candidate = resolved_base.joinpath(*parts).resolve()
+    if not candidate.is_relative_to(resolved_base):
+        raise ValueError("生成的路径越过预期数据目录")
+    return candidate
 
 
 def save_raw_snapshot(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
     assert_valid_daily_prices(frame)
     symbol = str(frame["symbol"].iloc[0])
-    source = str(frame["source"].iloc[0])
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    directory = paths.raw / source / _safe_symbol(symbol)
+    source = _safe_path_component(str(frame["source"].iloc[0]), label="source")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    directory = _contained_path(paths.raw, source, _safe_symbol(symbol))
     directory.mkdir(parents=True, exist_ok=True)
-    output = directory / f"{timestamp}.parquet"
-    frame.to_parquet(output, index=False)
+    output = _contained_path(directory, f"{timestamp}_{uuid.uuid4().hex}.parquet")
+    write_parquet_immutable(frame, output)
     return output
 
 
 def save_curated(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
     assert_valid_daily_prices(frame)
     symbol = str(frame["symbol"].iloc[0])
-    output = paths.curated / f"{_safe_symbol(symbol)}.parquet"
+    output = _contained_path(paths.curated, f"{_safe_symbol(symbol)}.parquet")
     if output.exists():
         previous = pd.read_parquet(output)
         combined = pd.concat([previous, frame], ignore_index=True)
@@ -44,7 +71,7 @@ def save_curated(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
         frame = frame.drop(columns="_source_priority")
     frame = frame.sort_values("trade_date").reset_index(drop=True)
     assert_valid_daily_prices(frame)
-    frame.to_parquet(output, index=False)
+    write_parquet_atomic(frame, output)
     return output
 
 
@@ -70,7 +97,7 @@ def sync_duckdb(paths: ProjectPaths) -> int:
 
 
 def read_curated(symbol: str, paths: ProjectPaths) -> pd.DataFrame:
-    path = paths.curated / f"{_safe_symbol(symbol)}.parquet"
+    path = _contained_path(paths.curated, f"{_safe_symbol(symbol)}.parquet")
     if not path.exists():
         raise FileNotFoundError(f"尚未找到 {symbol} 的整理数据，请先运行数据更新")
     frame = pd.read_parquet(path)

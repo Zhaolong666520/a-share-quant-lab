@@ -4,12 +4,16 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
+from finance_lab import pipeline
 from finance_lab.config import get_paths
 from finance_lab.pipeline import (
     cost_stress_symbol,
     create_demo_report,
     execution_test_symbol,
     parameter_test_symbol,
+    update_market_data,
     walk_forward_symbol,
 )
 from finance_lab.sample import make_synthetic_daily_prices
@@ -113,3 +117,38 @@ def test_execution_pipeline_reads_curated_data_and_writes_report(tmp_path: Path)
     assert len(scenarios) == 3
     assert all(bool(item["execution_checks"]["passed"]) for item in scenarios)
     assert "指数本身不能直接交易" in report.read_text(encoding="utf-8")
+
+
+def test_update_summary_write_failure_preserves_previous_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pipeline, "load_instruments", lambda root: [])
+    update_market_data(date(2024, 1, 1), date(2024, 1, 2), tmp_path)
+    summary = get_paths(tmp_path).outputs / "update_summary.json"
+    expected = summary.read_text(encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def interrupted_write_text(
+        self: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        original_write_text(
+            self,
+            "partial json",
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+        raise OSError("simulated interrupted write")
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write_text)
+
+    with pytest.raises(OSError, match="simulated"):
+        update_market_data(date(2024, 1, 1), date(2024, 1, 3), tmp_path)
+
+    assert summary.read_text(encoding="utf-8") == expected
+    assert not list(summary.parent.glob(".*.tmp"))
