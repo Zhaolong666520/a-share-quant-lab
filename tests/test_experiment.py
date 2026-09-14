@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from finance_lab.backtest import run_backtest
 from finance_lab.config import get_paths
 from finance_lab.experiment import run_split_experiment
 from finance_lab.experiment_report import write_split_experiment_report
@@ -88,3 +90,37 @@ def test_different_experiment_configs_preserve_both_reports(tmp_path: Path) -> N
 
     assert first_outputs[0] != second_outputs[0]
     assert all(path.exists() for path in first_outputs + second_outputs)
+
+
+def test_boundary_trade_uses_same_period_as_its_return_and_cost() -> None:
+    prices = make_synthetic_daily_prices(periods=900)
+    frame = run_backtest(prices).frame
+    position_change = frame["position"].diff().fillna(frame["position"])
+    candidates = frame.loc[position_change.abs() > 1e-12].iloc[1:-1]
+    boundary_row = candidates.iloc[len(candidates) // 2]
+    split_date = pd.Timestamp(boundary_row["return_end_date"]).date()
+
+    result = run_split_experiment(
+        prices,
+        split_date=split_date,
+        min_period_observations=2,
+    )
+    boundary_trade = result.trades.loc[
+        result.trades["trade_date"] == boundary_row["trade_date"]
+    ].iloc[0]
+
+    assert pd.Timestamp(boundary_trade["return_end_date"]).date() == split_date
+    assert boundary_trade["experiment_period"] == "out_of_sample"
+    assert boundary_trade["signal_date"] < boundary_trade["trade_date"]
+    assert boundary_trade["trade_date"] < boundary_trade["return_end_date"]
+
+
+def test_empty_trade_log_keeps_auditable_period_columns() -> None:
+    prices = make_synthetic_daily_prices(periods=900)
+    prices[["open", "high", "low", "close"]] = 100.0
+
+    result = run_split_experiment(prices, split_date=date(2024, 1, 1))
+
+    assert result.trades.empty
+    assert "return_end_date" in result.trades.columns
+    assert "experiment_period" in result.trades.columns
