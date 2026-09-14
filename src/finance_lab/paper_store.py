@@ -66,6 +66,97 @@ class PaperPortfolioSnapshot(TypedDict):
     accounts: list[PaperAccountSnapshot]
 
 
+CURRENT_PAPER_SCHEMA_VERSION = 2
+
+_REQUIRED_SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
+    "paper_schema_metadata": frozenset({"schema_version", "applied_at"}),
+    "paper_accounts": frozenset(
+        {
+            "account_id",
+            "portfolio_id",
+            "symbol",
+            "instrument_kind",
+            "strategy",
+            "strategy_parameters_json",
+            "initial_cash",
+            "lot_size",
+            "commission_bps",
+            "minimum_commission",
+            "sell_tax_bps",
+            "slippage_bps",
+            "config_hash",
+            "created_at",
+            "created_market_date",
+            "engine_version",
+        }
+    ),
+    "paper_runs": frozenset(
+        {
+            "run_id",
+            "batch_id",
+            "account_id",
+            "trade_date",
+            "status",
+            "started_at",
+            "completed_at",
+            "dataset_id",
+            "curated_sha256",
+            "manifest_generated_at",
+            "data_health_json",
+            "event_count",
+            "state_hash",
+        }
+    ),
+    "paper_events": frozenset(
+        {
+            "event_id",
+            "run_id",
+            "account_id",
+            "trade_date",
+            "sequence_no",
+            "event_type",
+            "signal_date",
+            "order_id",
+            "action",
+            "quantity",
+            "reference_price",
+            "execution_price",
+            "notional",
+            "commission",
+            "tax",
+            "slippage_cost",
+            "cash_after",
+            "shares_after",
+            "close_price",
+            "equity_after",
+            "drawdown_after",
+            "reason_code",
+            "payload_json",
+            "previous_event_hash",
+            "event_hash",
+            "created_at",
+        }
+    ),
+    "paper_state": frozenset(
+        {
+            "account_id",
+            "last_trade_date",
+            "cash",
+            "shares",
+            "last_close",
+            "equity",
+            "equity_peak",
+            "drawdown",
+            "last_target_position",
+            "pending_order_json",
+            "distribution_entitlements_json",
+            "last_event_hash",
+            "updated_at",
+        }
+    ),
+}
+
+
 class PaperStore:
     """Own the isolated paper-trading tables inside a local DuckDB database."""
 
@@ -96,6 +187,22 @@ class PaperStore:
         if self.read_only:
             raise RuntimeError("只读账本不能创建或升级表结构")
         connection = self._require_connection()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            self._ensure_schema_objects()
+            self._validate_schema()
+            connection.execute(
+                "INSERT INTO paper_schema_metadata (schema_version) VALUES (?) "
+                "ON CONFLICT (schema_version) DO NOTHING",
+                [CURRENT_PAPER_SCHEMA_VERSION],
+            )
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+
+    def _ensure_schema_objects(self) -> None:
+        connection = self._require_connection()
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_schema_metadata (
@@ -104,6 +211,14 @@ class PaperStore:
             )
             """
         )
+        version_row = connection.execute(
+            "SELECT MAX(schema_version) FROM paper_schema_metadata"
+        ).fetchone()
+        current_version = None if version_row is None else version_row[0]
+        if current_version is not None and int(current_version) > CURRENT_PAPER_SCHEMA_VERSION:
+            raise PaperStoreError(
+                "账本来自未来版本，当前程序不能安全打开；请升级 finance-lab"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -199,30 +314,101 @@ class PaperStore:
             """
         )
         state_columns = {
-            str(row[0])
+            str(row[0]): str(row[1])
             for row in connection.execute(
-                "SELECT column_name FROM information_schema.columns "
+                "SELECT column_name, is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'main' AND table_name = 'paper_state'"
             ).fetchall()
         }
+        required_legacy_columns = _REQUIRED_SCHEMA_COLUMNS["paper_state"] - {
+            "distribution_entitlements_json"
+        }
+        missing_legacy_columns = sorted(required_legacy_columns - state_columns.keys())
+        if missing_legacy_columns:
+            raise PaperStoreError(
+                "账本表结构不完整或不兼容: "
+                f"paper_state 缺少字段 {missing_legacy_columns}"
+            )
         if "distribution_entitlements_json" not in state_columns:
             connection.execute(
                 "ALTER TABLE paper_state ADD COLUMN "
                 "distribution_entitlements_json VARCHAR DEFAULT '[]'"
             )
+            state_columns["distribution_entitlements_json"] = "YES"
+        if state_columns["distribution_entitlements_json"] != "NO":
             connection.execute(
-                "UPDATE paper_state SET distribution_entitlements_json = '[]' "
-                "WHERE distribution_entitlements_json IS NULL"
+                """
+                CREATE TEMP TABLE paper_state_migration_buffer AS
+                SELECT
+                    account_id, last_trade_date, cash, shares, last_close, equity,
+                    equity_peak, drawdown, last_target_position, pending_order_json,
+                    COALESCE(distribution_entitlements_json, '[]')
+                        AS distribution_entitlements_json,
+                    last_event_hash, updated_at
+                FROM paper_state
+                """
             )
+            connection.execute("DROP TABLE paper_state")
+            connection.execute(
+                """
+                CREATE TABLE paper_state (
+                    account_id VARCHAR PRIMARY KEY,
+                    last_trade_date DATE NOT NULL,
+                    cash DOUBLE NOT NULL CHECK (cash >= 0),
+                    shares BIGINT NOT NULL CHECK (shares >= 0),
+                    last_close DOUBLE NOT NULL,
+                    equity DOUBLE NOT NULL,
+                    equity_peak DOUBLE NOT NULL,
+                    drawdown DOUBLE NOT NULL,
+                    last_target_position INTEGER,
+                    pending_order_json VARCHAR,
+                    distribution_entitlements_json VARCHAR NOT NULL DEFAULT '[]',
+                    last_event_hash VARCHAR NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO paper_state (
+                    account_id, last_trade_date, cash, shares, last_close, equity,
+                    equity_peak, drawdown, last_target_position, pending_order_json,
+                    distribution_entitlements_json, last_event_hash, updated_at
+                )
+                SELECT * FROM paper_state_migration_buffer
+                """
+            )
+            connection.execute("DROP TABLE paper_state_migration_buffer")
+        else:
             connection.execute(
                 "ALTER TABLE paper_state ALTER COLUMN "
-                "distribution_entitlements_json SET NOT NULL"
+                "distribution_entitlements_json SET DEFAULT '[]'"
             )
-        connection.execute(
-            "INSERT INTO paper_schema_metadata (schema_version) VALUES (?) "
-            "ON CONFLICT (schema_version) DO NOTHING",
-            [2],
-        )
+
+    def _validate_schema(self) -> None:
+        connection = self._require_connection()
+        rows = connection.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'main'"
+        ).fetchall()
+        actual: dict[str, set[str]] = {}
+        for table_name, column_name in rows:
+            actual.setdefault(str(table_name), set()).add(str(column_name))
+        problems: list[str] = []
+        for table_name, required_columns in _REQUIRED_SCHEMA_COLUMNS.items():
+            missing = sorted(required_columns - actual.get(table_name, set()))
+            if missing:
+                problems.append(f"{table_name} 缺少字段 {missing}")
+
+        entitlement = connection.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'main' AND table_name = 'paper_state' "
+            "AND column_name = 'distribution_entitlements_json'"
+        ).fetchone()
+        if entitlement != ("VARCHAR", "NO"):
+            problems.append("paper_state.distribution_entitlements_json 类型或空值约束错误")
+        if problems:
+            raise PaperStoreError("账本表结构不完整或不兼容: " + "; ".join(problems))
 
     def portfolio_exists(self, portfolio_id: str) -> bool:
         connection = self._require_connection()
