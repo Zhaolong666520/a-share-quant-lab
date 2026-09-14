@@ -33,7 +33,7 @@ jobs:
       - name: Install project
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip==26.2.1 setuptools==80.9.0 wheel==0.45.1
+          python -m pip install --upgrade pip==26.2.1 setuptools==83.0.0 wheel==0.46.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -r requirements-lock.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -47,10 +47,57 @@ jobs:
         run: python -m mypy src
 
       - name: pytest
-        run: python -m pytest
+        run: python -m pytest --cov=finance_lab --cov-branch --cov-report=term-missing --cov-fail-under=80
+
+      - name: Markdown links
+        run: python scripts/check_markdown_links.py
 
       - name: Compile
         run: python -m compileall -q src tests
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Audit locked dependencies
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -r requirements-lock.txt
+          python -m pip_audit -r requirements-lock.txt --strict
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install --upgrade pip==26.2.1 setuptools==83.0.0 wheel==0.46.2
+          python -m pip install -r requirements-lock.txt
+          python -m build --no-isolation
+
+      - name: Install wheel in a clean environment
+        shell: bash
+        run: |
+          python -m venv smoke-venv
+          smoke-venv/bin/python -m pip install dist/*.whl
+          smoke-venv/bin/python -c "import finance_lab; print(finance_lab.__version__)"
+          smoke-venv/bin/finance-lab --help
 
   posix-demo:
     name: demo (${{ matrix.os }})

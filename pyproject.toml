@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+requires = ["setuptools==83.0.0", "wheel==0.46.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "finance-lab"
-version = "0.9.1"
+dynamic = ["version"]
 description = "面向初学者的 A 股日线数据与可复现回测实验室"
 readme = "README.md"
 license = "MIT"
@@ -40,8 +40,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2,<2",
   "mypy>=1.15,<2",
+  "pip-audit>=2.9,<3",
   "pytest>=8,<10",
+  "pytest-cov>=6,<8",
   "ruff>=0.11,<1",
 ]
 
@@ -57,12 +60,23 @@ Changelog = "https://github.com/Zhaolong666520/a-share-quant-lab/blob/main/CHANG
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.dynamic]
+version = { attr = "finance_lab.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["finance_lab"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
 
 [tool.ruff]
 line-length = 100

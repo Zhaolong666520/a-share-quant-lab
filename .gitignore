@@ -5,6 +5,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+smoke-venv/
 .planning/
 package_staging_*/
 package_verify_*/
