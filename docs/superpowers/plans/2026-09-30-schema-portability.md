@@ -22,3 +22,12 @@ Ruff 全项目、mypy 49 个源文件、85 份 Markdown 链接、编译、依赖
 P1.3 本地交付完成；P1.2b.3 的 Windows 验收与跨系统运行配置完成，但其他系统实测仍未完成。
 未提交、推送或运行远程 CI，未对真实账本迁移或切换。剩余跨系统验收需要用户授权推送并等待工作流执行。
 详见[账本结构与跨平台验收](../../账本结构与跨平台验收.md)。
+
+## 授权后的远程平台验收
+
+用户随后授权提交、推送并检查 CI。已推送到 `codex/v1-quality-sprint`，创建 [PR #13](https://github.com/Zhaolong666520/a-share-quant-lab/pull/13)，不直接合并或发布。
+[运行 36705469010](https://github.com/Zhaolong666520/a-share-quant-lab/actions/runs/36705469010) 中 Windows、Ubuntu、macOS 的存储验收均成功。
+逐一下载并核对三份 JUnit：各 87 tests、0 failures、0 errors、0 skipped。
+实际目录枚举：Linux 为 4 个大小写/Unicode 名称，macOS 为 2 个合并别名条目，覆盖不同真实文件系统行为。
+先前“其他系统未实测”的记录为当时状态；现在 P1.2b.3 的所列三平台验收已完成。
+真实行情和账本仍未迁移或切换，PR 尚未合并。

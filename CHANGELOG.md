@@ -7,7 +7,7 @@
 ### Added
 
 - 账本完整结构契约与非空 v1 迁移验收：全部字段类型、空值、默认值及主键/唯一/CHECK 约束检查，提交前事件恢复一致性审计，错误版本及异常迁移安全拒绝/回滚。
-- Windows/Linux/macOS 存储验收 CI 配置及平台证据报告；配置已就绪，其他系统实测仍需实际运行。
+- Windows/Linux/macOS 存储验收 CI 及平台证据报告；三平台各 87 项通过、无失败或跳过。
 
 - `data-recovery-activate` / `data-recovery-acceptance-verify`：人工确认候选后，验收至全新目录，保留原现场与模拟账本，最后发布可读状态；不自动切换真实项目。
 - `research-session-create` / `research-session-verify` 和 15 个研究命令的 `--session`：跨命令冻结完整数据与配置，自动绑定数据集 ID，校验前后指纹并阻止快照行情及模拟账本写入。
