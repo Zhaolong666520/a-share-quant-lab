@@ -11,9 +11,11 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
 from finance_lab import __version__
+from finance_lab.atomic_io import write_file_atomic, write_text_atomic
 from finance_lab.backtest import BacktestMetrics
 from finance_lab.config import ProjectPaths
 from finance_lab.experiment import SplitExperimentResult
+from finance_lab.report_bundle import publish_report_bundle
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -92,13 +94,20 @@ def write_split_experiment_report(
     axis.grid(alpha=0.25)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
+    try:
+        write_file_atomic(
+            chart_path, lambda temporary: figure.savefig(temporary, dpi=150, format="png")
+        )
+    finally:
+        plt.close(figure)
 
     trades = result.trades.copy()
     trades["trade_date"] = trades["trade_date"].dt.strftime("%Y-%m-%d")
     trades["signal_date"] = trades["signal_date"].dt.strftime("%Y-%m-%d")
-    trades.to_csv(trades_path, index=False, encoding="utf-8-sig")
+    write_file_atomic(
+        trades_path,
+        lambda temporary: trades.to_csv(temporary, index=False, encoding="utf-8-sig"),
+    )
 
     sources = ", ".join(sorted(str(value) for value in frame["source"].dropna().unique()))
     document = f"""<!doctype html>
@@ -146,7 +155,7 @@ def write_split_experiment_report(
 </body>
 </html>
 """
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
     payload = {
         "settings": result.settings_dict(),
         "full_metrics": result.full_result.metrics.to_dict(),
@@ -160,5 +169,6 @@ def write_split_experiment_report(
             "Historical results are not investment advice.",
         ],
     }
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text_atomic(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    publish_report_bundle(html_path, (html_path, chart_path, json_path, trades_path))
     return html_path, chart_path, json_path, trades_path

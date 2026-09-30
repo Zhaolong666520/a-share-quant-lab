@@ -10,6 +10,7 @@ import pytest
 from finance_lab.cli import build_parser
 from finance_lab.config import get_paths
 from finance_lab.pipeline import strategy_compare_symbol
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
 from finance_lab.strategy_comparison import STRATEGY_ORDER, run_strategy_comparison
@@ -164,6 +165,7 @@ def test_report_symbol_cannot_escape_outputs_directory(tmp_path: Path) -> None:
 
     output_root = (tmp_path / "outputs").resolve()
     assert all(path.resolve().is_relative_to(output_root) for path in outputs)
+    assert verify_report_bundle(outputs[0])["files_checked"] == len(outputs)
 
 
 def test_future_prices_do_not_change_development_metrics() -> None:

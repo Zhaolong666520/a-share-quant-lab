@@ -10,9 +10,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from finance_lab.atomic_io import published_parquet_files, write_text_atomic
 from finance_lab.config import ProjectPaths
+from finance_lab.data_identity import validate_data_identity
+from finance_lab.market_data_lock import market_data_lock
+from finance_lab.market_data_state import assert_market_data_readable
+from finance_lab.report_bundle import publish_report_bundle
 from finance_lab.trading_calendar import load_project_sse_trading_calendar
-from finance_lab.validation import validate_daily_prices
+from finance_lab.validation import parse_trade_dates, validate_daily_prices
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,7 @@ class UpdateRecord:
     rows: int
     curated_file: str | None
     source_errors: dict[str, str]
+    source_diagnostics: dict[str, dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,12 @@ def file_sha256(path: Path) -> str:
 
 
 def read_update_summary(paths: ProjectPaths) -> UpdateSummary:
+    with market_data_lock(paths.data):
+        assert_market_data_readable(paths)
+        return _read_update_summary(paths)
+
+
+def _read_update_summary(paths: ProjectPaths) -> UpdateSummary:
     summary_path = paths.outputs / "update_summary.json"
     if not summary_path.exists():
         return UpdateSummary(end=None, records=(), parse_error=None)
@@ -128,12 +140,46 @@ def read_update_summary(paths: ProjectPaths) -> UpdateSummary:
                 for source, message in source_errors_raw.items()
             ):
                 raise TypeError("source_errors 的键和值必须是字符串")
+            diagnostics_raw = record.get("source_diagnostics", {})
+            if not isinstance(diagnostics_raw, dict):
+                raise TypeError("source_diagnostics 必须是对象")
+            diagnostics: dict[str, dict[str, object]] = {}
+            for source, item in diagnostics_raw.items():
+                if not isinstance(source, str) or not isinstance(item, dict):
+                    raise TypeError("source_diagnostics 条目无效")
+                required_keys = {
+                    "status", "stage", "received_rows", "accepted_rows", "rejected_rows",
+                    "rejection_reasons", "first_trade_date", "last_trade_date",
+                }
+                if set(item) != required_keys:
+                    raise TypeError("source_diagnostics 字段无效")
+                received = item["received_rows"]
+                accepted = item["accepted_rows"]
+                rejected = item["rejected_rows"]
+                if (
+                    not all(type(n) is int and n >= 0 for n in (received, accepted, rejected))
+                    or received != accepted + rejected
+                    or item["status"] not in {"success", "filtered", "failed"}
+                    or not isinstance(item["stage"], str)
+                    or not isinstance(item["rejection_reasons"], dict)
+                    or not all(
+                        isinstance(reason, str) and type(count) is int and count >= 0
+                        for reason, count in item["rejection_reasons"].items()
+                    )
+                    or not all(
+                        value is None or isinstance(value, str)
+                        for value in (item["first_trade_date"], item["last_trade_date"])
+                    )
+                ):
+                    raise TypeError("source_diagnostics 计数或状态无效")
+                diagnostics[source] = item
             parsed_records.append(
                 UpdateRecord(
                     symbol=symbol.strip(),
                     rows=rows,
                     curated_file=curated_file,
                     source_errors=dict(sorted(source_errors_raw.items())),
+                    source_diagnostics=dict(sorted(diagnostics.items())),
                 )
             )
         end = payload.get("end")
@@ -148,8 +194,10 @@ def read_update_summary(paths: ProjectPaths) -> UpdateSummary:
         return UpdateSummary(end=None, records=(), parse_error=str(exc))
 
 
-def _load_upstream_status(paths: ProjectPaths) -> tuple[dict[str, dict[str, str]], str | None]:
-    summary = read_update_summary(paths)
+def _load_upstream_status(
+    paths: ProjectPaths, *, recovery_preflight: bool = False
+) -> tuple[dict[str, dict[str, str]], str | None]:
+    summary = _read_update_summary(paths) if recovery_preflight else read_update_summary(paths)
     if summary.parse_error is not None:
         return {"__update_summary__": {"parse": summary.parse_error}}, None
     errors = {
@@ -201,13 +249,25 @@ def generate_dataset_manifest(
     as_of_date: date | None = None,
     stale_after_business_days: int = 3,
 ) -> DatasetManifest:
+    with market_data_lock(paths.data):
+        assert_market_data_readable(paths)
+        return _generate_dataset_manifest(paths, as_of_date, stale_after_business_days)
+
+
+def _generate_dataset_manifest(
+    paths: ProjectPaths,
+    as_of_date: date | None,
+    stale_after_business_days: int,
+    *,
+    recovery_preflight: bool = False,
+) -> DatasetManifest:
     if (
         type(stale_after_business_days) is not int
         or stale_after_business_days < 0
     ):
         raise ValueError("stale_after_business_days 必须是大于等于0的整数")
     effective_as_of = as_of_date or date.today()
-    parquet_files = sorted(paths.curated.glob("*.parquet"))
+    parquet_files = published_parquet_files(paths.curated)
     if not parquet_files:
         raise FileNotFoundError("data/curated 中没有可生成清单的Parquet文件")
     calendar = load_project_sse_trading_calendar(paths.root)
@@ -220,9 +280,9 @@ def generate_dataset_manifest(
         hash_after = file_sha256(path)
         if hash_before != hash_after:
             raise RuntimeError(f"{path.name} 在生成清单期间发生变化，请重试")
+        issues = validate_daily_prices(frame) + validate_data_identity(frame, filename=path.name)
         if "trade_date" in frame.columns:
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-        issues = validate_daily_prices(frame)
+            frame["trade_date"] = parse_trade_dates(frame["trade_date"]).dt.tz_localize(None)
         issue_warnings = [issue.code for issue in issues if issue.severity == "warning"]
         issue_errors = [issue.code for issue in issues if issue.severity == "error"]
 
@@ -256,8 +316,6 @@ def generate_dataset_manifest(
             ingested = pd.to_datetime(frame["ingested_at"], errors="coerce", utc=True)
             if ingested.isna().any():
                 issue_errors.append("invalid_ingested_at")
-        if len(symbols) > 1:
-            issue_errors.append("mixed_symbols")
         if len(adjustments) > 1:
             issue_errors.append("mixed_adjustments")
         if len(volume_units) > 1:
@@ -293,7 +351,9 @@ def generate_dataset_manifest(
         )
 
     files = tuple(items)
-    upstream_errors, update_summary_end = _load_upstream_status(paths)
+    upstream_errors, update_summary_end = _load_upstream_status(
+        paths, recovery_preflight=recovery_preflight
+    )
     has_errors = any(item.error_codes for item in files)
     has_warnings = any(item.warning_codes for item in files) or bool(upstream_errors)
     health_status = "error" if has_errors else "warning" if has_warnings else "pass"
@@ -354,9 +414,9 @@ def write_dataset_manifest_report(
     stem = f"dataset_manifest_{manifest.dataset_id[:12]}_r{_report_context_id(manifest)}"
     json_path = paths.outputs / f"{stem}.json"
     html_path = paths.outputs / f"{stem}_report.html"
-    json_path.write_text(
+    write_text_atomic(
+        json_path,
         json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
     )
     rows = "\n".join(
         "<tr>"
@@ -411,5 +471,6 @@ code {{ background: #f2f4f7; padding: 2px 5px; }}
 <table><thead><tr><th>标的</th><th>行数</th><th>区间</th><th>滞后交易日</th>
 <th>来源</th><th>复权</th><th>状态</th></tr></thead><tbody>{rows}</tbody></table>
 </body></html>"""
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
+    publish_report_bundle(html_path, (html_path, json_path))
     return json_path, html_path

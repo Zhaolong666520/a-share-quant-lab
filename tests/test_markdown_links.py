@@ -30,7 +30,7 @@ def test_checker_reports_source_and_target_for_missing_local_link(tmp_path: Path
     assert "docs/missing.md" in result.stdout
 
 
-def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) -> None:
+def test_checker_ignores_remote_mailto_and_anchor_links(tmp_path: Path) -> None:
     guide = tmp_path / "guide.md"
     guide.write_text(
         "\n".join(
@@ -38,7 +38,6 @@ def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) ->
                 "[Website](https://example.com/docs)",
                 "[Email](mailto:maintainer@example.com)",
                 "[Section](#next-step)",
-                "![Diagram](missing-image.png)",
             ]
         ),
         encoding="utf-8",
@@ -50,15 +49,46 @@ def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) ->
     assert result.stdout == ""
 
 
-def test_default_check_covers_repository_entrypoint_documents() -> None:
+def test_checker_reports_missing_local_image(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text("![Diagram](missing-image.png)\n", encoding="utf-8")
+
+    result = _run_checker(guide)
+
+    assert result.returncode == 1
+    assert "missing-image.png" in result.stdout
+
+
+def test_default_check_covers_every_repository_markdown_file() -> None:
     result = _run_checker()
+    expected_documents = sorted(
+        path
+        for path in PROJECT_ROOT.rglob("*.md")
+        if not any(
+                part
+                in {
+                    ".git",
+                    ".mypy_cache",
+                    ".pytest_cache",
+                    ".ruff_cache",
+                    ".venv",
+                    ".worktrees",
+                    "build",
+                    "dist",
+                    "smoke-venv",
+                }
+            or part.startswith(("package_staging_", "package_verify_"))
+            for part in path.relative_to(PROJECT_ROOT).parts
+        )
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Checked 4 Markdown files" in result.stdout
+    assert f"Checked {len(expected_documents)} Markdown files" in result.stdout
     assert "README.md" in result.stdout
     assert "CONTRIBUTING.md" in result.stdout
-    assert "docs/快速开始.md" in result.stdout
-    assert "docs/quickstart.en.md" in result.stdout
+    assert "experiments/008_forward_paper_trading.md" in result.stdout
+    assert ".pytest_cache" not in result.stdout
+    assert "smoke-venv" not in result.stdout
 
 
 def test_checker_resolves_a_local_file_before_its_fragment(tmp_path: Path) -> None:

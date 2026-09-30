@@ -33,6 +33,7 @@ from finance_lab.paper_risk import (
     calculate_paper_risk,
 )
 from finance_lab.paper_store import PaperPortfolioSnapshot, PaperStore
+from finance_lab.storage import read_curated
 from finance_lab.validation import assert_valid_daily_prices
 
 PAPER_REPORT_SCHEMA_VERSION = 4
@@ -343,11 +344,10 @@ def _attribution_prices(
     if not legacy_valuations:
         return pd.DataFrame(rows)
 
-    safe_symbol = symbol.replace(".", "_").replace("/", "_")
-    curated_path = (paths.curated / f"{safe_symbol}.parquet").resolve()
-    if not curated_path.is_relative_to(paths.curated.resolve()) or not curated_path.is_file():
-        raise ValueError("旧估值事件缺少开盘价，且找不到兼容回填所需的整理行情")
-    prices = pd.read_parquet(curated_path)
+    try:
+        prices = read_curated(symbol, paths)
+    except FileNotFoundError as exc:
+        raise ValueError("旧估值事件缺少开盘价，且找不到兼容回填所需的整理行情") from exc
     assert_valid_daily_prices(prices)
     prices = prices.loc[prices["symbol"].astype(str) == symbol].copy()
     if prices.empty:

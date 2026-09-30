@@ -8,6 +8,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime
+from functools import lru_cache
 from pathlib import Path
 from types import TracebackType
 from typing import Self, TypedDict, cast
@@ -66,6 +67,128 @@ class PaperPortfolioSnapshot(TypedDict):
     accounts: list[PaperAccountSnapshot]
 
 
+CURRENT_PAPER_SCHEMA_VERSION = 2
+
+
+def _paper_schema_signature(
+    connection: duckdb.DuckDBPyConnection,
+) -> tuple[tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]:
+    columns = connection.execute(
+        "SELECT table_name, column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns WHERE table_schema = 'main' "
+        "AND table_name LIKE 'paper\\_%' ESCAPE '\\' ORDER BY table_name, column_name"
+    ).fetchall()
+    constraints = connection.execute(
+        "SELECT table_name, constraint_type, constraint_text, constraint_column_names "
+        "FROM duckdb_constraints() WHERE schema_name = 'main' "
+        "AND table_name LIKE 'paper\\_%' ESCAPE '\\' "
+        "ORDER BY table_name, constraint_type, constraint_text, constraint_column_names"
+    ).fetchall()
+    return tuple(columns), tuple(
+        (table, kind, text, tuple(names)) for table, kind, text, names in constraints
+    )
+
+
+@lru_cache(maxsize=1)
+def _expected_paper_schema() -> tuple[
+    tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]
+]:
+    # Generate the contract from the same canonical DDL, in an isolated memory DB.
+    # No user database is created, repaired, or probed with invalid writes.
+    with PaperStore(Path(":memory:")) as reference:
+        reference._ensure_schema_objects()
+        return _paper_schema_signature(reference._require_connection())
+
+
+_REQUIRED_SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
+    "paper_schema_metadata": frozenset({"schema_version", "applied_at"}),
+    "paper_accounts": frozenset(
+        {
+            "account_id",
+            "portfolio_id",
+            "symbol",
+            "instrument_kind",
+            "strategy",
+            "strategy_parameters_json",
+            "initial_cash",
+            "lot_size",
+            "commission_bps",
+            "minimum_commission",
+            "sell_tax_bps",
+            "slippage_bps",
+            "config_hash",
+            "created_at",
+            "created_market_date",
+            "engine_version",
+        }
+    ),
+    "paper_runs": frozenset(
+        {
+            "run_id",
+            "batch_id",
+            "account_id",
+            "trade_date",
+            "status",
+            "started_at",
+            "completed_at",
+            "dataset_id",
+            "curated_sha256",
+            "manifest_generated_at",
+            "data_health_json",
+            "event_count",
+            "state_hash",
+        }
+    ),
+    "paper_events": frozenset(
+        {
+            "event_id",
+            "run_id",
+            "account_id",
+            "trade_date",
+            "sequence_no",
+            "event_type",
+            "signal_date",
+            "order_id",
+            "action",
+            "quantity",
+            "reference_price",
+            "execution_price",
+            "notional",
+            "commission",
+            "tax",
+            "slippage_cost",
+            "cash_after",
+            "shares_after",
+            "close_price",
+            "equity_after",
+            "drawdown_after",
+            "reason_code",
+            "payload_json",
+            "previous_event_hash",
+            "event_hash",
+            "created_at",
+        }
+    ),
+    "paper_state": frozenset(
+        {
+            "account_id",
+            "last_trade_date",
+            "cash",
+            "shares",
+            "last_close",
+            "equity",
+            "equity_peak",
+            "drawdown",
+            "last_target_position",
+            "pending_order_json",
+            "distribution_entitlements_json",
+            "last_event_hash",
+            "updated_at",
+        }
+    ),
+}
+
+
 class PaperStore:
     """Own the isolated paper-trading tables inside a local DuckDB database."""
 
@@ -96,6 +219,53 @@ class PaperStore:
         if self.read_only:
             raise RuntimeError("只读账本不能创建或升级表结构")
         connection = self._require_connection()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            objects = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'main' AND starts_with(lower(table_name), 'paper_')"
+                ).fetchall()
+            }
+            if objects and "paper_schema_metadata" not in objects:
+                raise PaperStoreError("账本表结构不完整：缺少版本元数据，禁止猜测版本")
+            migrating_full_ledger = False
+            existing = connection.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_name = 'paper_schema_metadata'"
+            ).fetchone()
+            if existing:
+                versions = connection.execute(
+                    "SELECT schema_version FROM paper_schema_metadata"
+                ).fetchall()
+                values = [row[0] for row in versions]
+                if not values and objects - {"paper_schema_metadata"}:
+                    raise PaperStoreError("账本版本记录为空，禁止猜测版本")
+                if any(type(value) is not int or value not in {1, 2} for value in values):
+                    raise PaperStoreError("账本版本不受支持或来自未来版本；请使用匹配程序")
+                if len(values) != len(set(values)):
+                    raise PaperStoreError("账本版本记录重复")
+                if values and max(values) == CURRENT_PAPER_SCHEMA_VERSION:
+                    self._validate_schema()  # Never silently repair a malformed current ledger.
+                migrating_full_ledger = values == [1] and objects == set(_REQUIRED_SCHEMA_COLUMNS)
+            self._ensure_schema_objects()
+            self._validate_schema()
+            connection.execute(
+                "INSERT INTO paper_schema_metadata (schema_version) VALUES (?) "
+                "ON CONFLICT (schema_version) DO NOTHING",
+                [CURRENT_PAPER_SCHEMA_VERSION],
+            )
+            if migrating_full_ledger:
+                # Audit replay before committing an authentic v1 ledger.
+                self._audit_recovery_ledger()
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+
+    def _ensure_schema_objects(self) -> None:
+        connection = self._require_connection()
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_schema_metadata (
@@ -104,6 +274,13 @@ class PaperStore:
             )
             """
         )
+        version_row = connection.execute(
+            "SELECT MAX(schema_version) FROM paper_schema_metadata"
+        ).fetchone()
+        current_version = None if version_row is None else version_row[0]
+        if current_version is not None and int(current_version) > CURRENT_PAPER_SCHEMA_VERSION:
+            raise PaperStoreError("账本来自未来版本，当前程序不能安全打开；请升级 finance-lab")
+        connection.execute("ALTER TABLE paper_schema_metadata ALTER COLUMN applied_at SET NOT NULL")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -199,30 +376,200 @@ class PaperStore:
             """
         )
         state_columns = {
-            str(row[0])
+            str(row[0]): str(row[1])
             for row in connection.execute(
-                "SELECT column_name FROM information_schema.columns "
+                "SELECT column_name, is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'main' AND table_name = 'paper_state'"
             ).fetchall()
         }
+        required_legacy_columns = _REQUIRED_SCHEMA_COLUMNS["paper_state"] - {
+            "distribution_entitlements_json"
+        }
+        missing_legacy_columns = sorted(required_legacy_columns - state_columns.keys())
+        if missing_legacy_columns:
+            raise PaperStoreError(
+                f"账本表结构不完整或不兼容: paper_state 缺少字段 {missing_legacy_columns}"
+            )
+        if state_columns.keys() - _REQUIRED_SCHEMA_COLUMNS["paper_state"]:
+            raise PaperStoreError("paper_state 存在未知字段，禁止迁移丢弃内容")
+        if current_version == 1:
+            expected, _ = _expected_paper_schema()
+            state_types = {row[1]: row[2] for row in expected if row[0] == "paper_state"}
+            types = connection.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'main' AND table_name = 'paper_state'"
+            ).fetchall()
+            if any(state_types.get(name) != dtype for name, dtype in types):
+                raise PaperStoreError("旧账本字段类型错误；禁止隐式转换或迁移")
         if "distribution_entitlements_json" not in state_columns:
             connection.execute(
                 "ALTER TABLE paper_state ADD COLUMN "
                 "distribution_entitlements_json VARCHAR DEFAULT '[]'"
             )
+            state_columns["distribution_entitlements_json"] = "YES"
+        if state_columns["distribution_entitlements_json"] != "NO":
             connection.execute(
-                "UPDATE paper_state SET distribution_entitlements_json = '[]' "
-                "WHERE distribution_entitlements_json IS NULL"
+                """
+                CREATE TEMP TABLE paper_state_migration_buffer AS
+                SELECT
+                    account_id, last_trade_date, cash, shares, last_close, equity,
+                    equity_peak, drawdown, last_target_position, pending_order_json,
+                    COALESCE(distribution_entitlements_json, '[]')
+                        AS distribution_entitlements_json,
+                    last_event_hash, updated_at
+                FROM paper_state
+                """
             )
+            connection.execute("DROP TABLE paper_state")
+            connection.execute(
+                """
+                CREATE TABLE paper_state (
+                    account_id VARCHAR PRIMARY KEY,
+                    last_trade_date DATE NOT NULL,
+                    cash DOUBLE NOT NULL CHECK (cash >= 0),
+                    shares BIGINT NOT NULL CHECK (shares >= 0),
+                    last_close DOUBLE NOT NULL,
+                    equity DOUBLE NOT NULL,
+                    equity_peak DOUBLE NOT NULL,
+                    drawdown DOUBLE NOT NULL,
+                    last_target_position INTEGER,
+                    pending_order_json VARCHAR,
+                    distribution_entitlements_json VARCHAR NOT NULL DEFAULT '[]',
+                    last_event_hash VARCHAR NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO paper_state (
+                    account_id, last_trade_date, cash, shares, last_close, equity,
+                    equity_peak, drawdown, last_target_position, pending_order_json,
+                    distribution_entitlements_json, last_event_hash, updated_at
+                )
+                SELECT * FROM paper_state_migration_buffer
+                """
+            )
+            connection.execute("DROP TABLE paper_state_migration_buffer")
+        else:
             connection.execute(
                 "ALTER TABLE paper_state ALTER COLUMN "
-                "distribution_entitlements_json SET NOT NULL"
+                "distribution_entitlements_json SET DEFAULT '[]'"
             )
-        connection.execute(
-            "INSERT INTO paper_schema_metadata (schema_version) VALUES (?) "
-            "ON CONFLICT (schema_version) DO NOTHING",
-            [2],
-        )
+
+    def _validate_schema(self) -> None:
+        connection = self._require_connection()
+        rows = connection.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'main'"
+        ).fetchall()
+        actual: dict[str, set[str]] = {}
+        for table_name, column_name in rows:
+            actual.setdefault(str(table_name), set()).add(str(column_name))
+        problems: list[str] = []
+        for table_name, required_columns in _REQUIRED_SCHEMA_COLUMNS.items():
+            missing = sorted(required_columns - actual.get(table_name, set()))
+            if missing:
+                problems.append(f"{table_name} 缺少字段 {missing}")
+
+        entitlement = connection.execute(
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'main' AND table_name = 'paper_state' "
+            "AND column_name = 'distribution_entitlements_json'"
+        ).fetchone()
+        if entitlement != ("VARCHAR", "NO"):
+            problems.append("paper_state.distribution_entitlements_json 类型或空值约束错误")
+        expected_columns, expected_constraints = _expected_paper_schema()
+        actual_columns, actual_constraints = _paper_schema_signature(connection)
+        if actual_columns != expected_columns:
+            problems.append("字段集合、类型、空值或默认值与受支持 schema 不一致")
+        if actual_constraints != expected_constraints:
+            problems.append("主键、唯一约束或 CHECK 约束与受支持 schema 不一致")
+        if problems:
+            raise PaperStoreError("账本表结构不完整或不兼容: " + "; ".join(problems))
+
+    def audit_recovery_ledger(self) -> dict[str, object]:
+        """Audit an evidence copy without creating tables, migrating, or repairing it."""
+        if not self.read_only:
+            raise PaperStoreError("恢复材料审计必须使用只读连接")
+        return self._audit_recovery_ledger()
+
+    def _audit_recovery_ledger(self) -> dict[str, object]:
+        """Pure audit, also used inside a migration transaction before commit."""
+        connection = self._require_connection()
+        rows = connection.execute(
+            "SELECT table_schema, table_name, table_type FROM information_schema.tables"
+        ).fetchall()
+        paper_tables = [(s, n, t) for s, n, t in rows if str(n).casefold().startswith("paper_")]
+        if not paper_tables:
+            return {"status": "not_present", "accounts": [], "event_count": 0}
+        if any(s != "main" or t != "BASE TABLE" for s, _, t in paper_tables):
+            raise PaperAuditError("账本对象不是受支持的 main 基础表")
+        if {n for _, n, _ in paper_tables} != set(_REQUIRED_SCHEMA_COLUMNS):
+            raise PaperAuditError("账本表集合不完整或存在未知表")
+        versions = connection.execute(
+            "SELECT schema_version FROM paper_schema_metadata ORDER BY schema_version"
+        ).fetchall()
+        values = [row[0] for row in versions]
+        if (
+            not values
+            or any(type(v) is not int or v not in {1, 2} for v in values)
+            or len(values) != len(set(values))
+            or max(values) != CURRENT_PAPER_SCHEMA_VERSION
+        ):
+            return {"status": "unsupported", "accounts": [], "event_count": 0}
+        self._validate_schema()
+        # Do not let an empty account query hide orphan records or duplicate IDs.
+        for table, identifier in (
+            ("paper_accounts", "account_id"),
+            ("paper_runs", "run_id"),
+            ("paper_events", "event_id"),
+            ("paper_state", "account_id"),
+        ):
+            counts = connection.execute(
+                f"SELECT COUNT(*), COUNT(DISTINCT {identifier}) FROM {table}"
+            ).fetchone()
+            if counts is None or counts[0] != counts[1]:
+                raise PaperAuditError("账本包含空标识或重复记录")
+        for table in ("paper_runs", "paper_events", "paper_state"):
+            orphan = connection.execute(
+                f"SELECT 1 FROM {table} t LEFT JOIN paper_accounts a "
+                "ON t.account_id = a.account_id WHERE a.account_id IS NULL LIMIT 1"
+            ).fetchone()
+            if orphan:
+                raise PaperAuditError("账本包含无所属账户的记录")
+        if connection.execute(
+            "SELECT 1 FROM paper_events e LEFT JOIN paper_runs r "
+            "ON e.run_id = r.run_id AND e.account_id = r.account_id "
+            "WHERE r.run_id IS NULL LIMIT 1"
+        ).fetchone():
+            raise PaperAuditError("账本包含无所属运行的事件")
+        portfolios = connection.execute(
+            "SELECT DISTINCT portfolio_id FROM paper_accounts ORDER BY portfolio_id"
+        ).fetchall()
+        accounts: list[dict[str, object]] = []
+        total = 0
+        for (portfolio,) in portfolios:
+            if not isinstance(portfolio, str) or not portfolio:
+                raise PaperAuditError("账本账户组标识无效")
+            for state in self.audit_portfolio(portfolio):
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM paper_events WHERE account_id = ?", [state.account_id]
+                ).fetchone()
+                count = int(row[0]) if row else 0
+                total += count
+                accounts.append(
+                    {
+                        "portfolio_id": portfolio,
+                        "account_id": state.account_id,
+                        "event_count": count,
+                        "last_event_hash": state.last_event_hash,
+                        "cash": state.cash,
+                        "shares": state.shares,
+                        "equity": state.equity,
+                    }
+                )
+        return {"status": "passed", "accounts": accounts, "event_count": total}
 
     def portfolio_exists(self, portfolio_id: str) -> bool:
         connection = self._require_connection()
@@ -465,21 +812,27 @@ class PaperStore:
                 )
 
     def _previous_event_hash(self, account: PaperAccount) -> str:
-        result = self._require_connection().execute(
-            """
+        result = (
+            self._require_connection()
+            .execute(
+                """
             SELECT event_hash FROM paper_events
             WHERE account_id = ?
             ORDER BY trade_date DESC, sequence_no DESC
             LIMIT 1
             """,
-            [account.account_id],
-        ).fetchone()
+                [account.account_id],
+            )
+            .fetchone()
+        )
         return account.config_hash if result is None else str(result[0])
 
     def load_states(self, portfolio_id: str) -> tuple[PaperState, ...]:
         """Load the derived cache for a portfolio in its fixed strategy order."""
-        rows = self._require_connection().execute(
-            """
+        rows = (
+            self._require_connection()
+            .execute(
+                """
             SELECT
                 state.account_id, state.last_trade_date, state.cash, state.shares,
                 state.last_close, state.equity, state.equity_peak, state.drawdown,
@@ -496,8 +849,10 @@ class PaperStore:
                 END,
                 state.account_id
             """,
-            [portfolio_id],
-        ).fetchall()
+                [portfolio_id],
+            )
+            .fetchall()
+        )
         return tuple(_state_from_row(row) for row in rows)
 
     def observed_cash_distribution_ids(
@@ -505,15 +860,19 @@ class PaperStore:
         portfolio_id: str,
     ) -> dict[str, frozenset[str]]:
         """Return distribution actions explicitly observed by each account."""
-        account_rows = self._require_connection().execute(
-            "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
-            [portfolio_id],
-        ).fetchall()
-        observed: dict[str, set[str]] = {
-            str(account_id): set() for (account_id,) in account_rows
-        }
-        rows = self._require_connection().execute(
-            """
+        account_rows = (
+            self._require_connection()
+            .execute(
+                "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
+                [portfolio_id],
+            )
+            .fetchall()
+        )
+        observed: dict[str, set[str]] = {str(account_id): set() for (account_id,) in account_rows}
+        rows = (
+            self._require_connection()
+            .execute(
+                """
             SELECT event.account_id, event.payload_json
             FROM paper_events AS event
             INNER JOIN paper_accounts AS account USING (account_id)
@@ -524,33 +883,34 @@ class PaperStore:
               )
             ORDER BY event.trade_date, event.account_id, event.sequence_no
             """,
-            [portfolio_id],
-        ).fetchall()
+                [portfolio_id],
+            )
+            .fetchall()
+        )
         for account_id_raw, payload_json in rows:
             account_id = str(account_id_raw)
             payload = _load_canonical_object(str(payload_json), "分红观察事件 payload")
-            observed[account_id].add(
-                _required_string(payload, "action_id", "分红观察事件")
-            )
-        return {
-            account_id: frozenset(action_ids)
-            for account_id, action_ids in observed.items()
-        }
+            observed[account_id].add(_required_string(payload, "action_id", "分红观察事件"))
+        return {account_id: frozenset(action_ids) for account_id, action_ids in observed.items()}
 
     def observed_share_adjustment_ids(
         self,
         portfolio_id: str,
     ) -> dict[str, frozenset[str]]:
         """Return share adjustments explicitly observed by each account."""
-        account_rows = self._require_connection().execute(
-            "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
-            [portfolio_id],
-        ).fetchall()
-        observed: dict[str, set[str]] = {
-            str(account_id): set() for (account_id,) in account_rows
-        }
-        rows = self._require_connection().execute(
-            """
+        account_rows = (
+            self._require_connection()
+            .execute(
+                "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?",
+                [portfolio_id],
+            )
+            .fetchall()
+        )
+        observed: dict[str, set[str]] = {str(account_id): set() for (account_id,) in account_rows}
+        rows = (
+            self._require_connection()
+            .execute(
+                """
             SELECT event.account_id, event.payload_json
             FROM paper_events AS event
             INNER JOIN paper_accounts AS account USING (account_id)
@@ -561,25 +921,22 @@ class PaperStore:
               )
             ORDER BY event.trade_date, event.account_id, event.sequence_no
             """,
-            [portfolio_id],
-        ).fetchall()
+                [portfolio_id],
+            )
+            .fetchall()
+        )
         for account_id_raw, payload_json in rows:
             account_id = str(account_id_raw)
-            payload = _load_canonical_object(
-                str(payload_json), "份额调整观察事件 payload"
-            )
-            observed[account_id].add(
-                _required_string(payload, "action_id", "份额调整观察事件")
-            )
-        return {
-            account_id: frozenset(action_ids)
-            for account_id, action_ids in observed.items()
-        }
+            payload = _load_canonical_object(str(payload_json), "份额调整观察事件 payload")
+            observed[account_id].add(_required_string(payload, "action_id", "份额调整观察事件"))
+        return {account_id: frozenset(action_ids) for account_id, action_ids in observed.items()}
 
     def load_accounts(self, portfolio_id: str) -> tuple[PaperAccount, ...]:
         """Restore the immutable account definitions after their audit succeeds."""
-        rows = self._require_connection().execute(
-            """
+        rows = (
+            self._require_connection()
+            .execute(
+                """
             SELECT
                 account_id, portfolio_id, symbol, instrument_kind, strategy,
                 strategy_parameters_json, initial_cash, lot_size, commission_bps,
@@ -595,8 +952,10 @@ class PaperStore:
                 END,
                 account_id
             """,
-            [portfolio_id],
-        ).fetchall()
+                [portfolio_id],
+            )
+            .fetchall()
+        )
         return tuple(_account_from_row(row) for row in rows)
 
     def rebuild_state(self, account_id: str) -> PaperState:
@@ -668,8 +1027,10 @@ class PaperStore:
         """Return an audited, JSON-ready view for reports and CLI status."""
         states = self.audit_portfolio(portfolio_id)
         state_by_account = {state.account_id: state for state in states}
-        account_rows = self._require_connection().execute(
-            """
+        account_rows = (
+            self._require_connection()
+            .execute(
+                """
             SELECT
                 account_id, symbol, instrument_kind, strategy,
                 strategy_parameters_json, initial_cash, lot_size, commission_bps,
@@ -685,8 +1046,10 @@ class PaperStore:
                 END,
                 account_id
             """,
-            [portfolio_id],
-        ).fetchall()
+                [portfolio_id],
+            )
+            .fetchall()
+        )
         accounts: list[PaperAccountSnapshot] = []
         for row in account_rows:
             (
@@ -735,8 +1098,10 @@ class PaperStore:
         return {"portfolio_id": portfolio_id, "accounts": accounts}
 
     def _latest_run_snapshot(self, account_id: str) -> dict[str, object]:
-        row = self._require_connection().execute(
-            """
+        row = (
+            self._require_connection()
+            .execute(
+                """
             SELECT
                 run_id, batch_id, trade_date, dataset_id, curated_sha256,
                 manifest_generated_at, data_health_json, event_count, state_hash
@@ -745,8 +1110,10 @@ class PaperStore:
             ORDER BY trade_date DESC, run_id DESC
             LIMIT 1
             """,
-            [account_id],
-        ).fetchone()
+                [account_id],
+            )
+            .fetchone()
+        )
         if row is None:
             raise PaperAuditError(f"模拟账户 {account_id} 缺少最新运行记录")
         (
@@ -767,9 +1134,7 @@ class PaperStore:
             "dataset_id": str(dataset_id),
             "curated_sha256": str(curated_sha256),
             "manifest_generated_at": str(manifest_generated_at),
-            "data_health": _load_canonical_object(
-                str(data_health_json), "运行数据健康上下文"
-            ),
+            "data_health": _load_canonical_object(str(data_health_json), "运行数据健康上下文"),
             "event_count": int(event_count),
             "state_hash": str(state_hash),
         }
@@ -929,9 +1294,7 @@ class PaperStore:
                 if open_price is not None:
                     parsed_open = _as_float(open_price, "估值开盘价")
                     if not math.isfinite(parsed_open) or parsed_open <= 0.0:
-                        raise PaperAuditError(
-                            f"模拟账户 {account_id} 的估值开盘价无效"
-                        )
+                        raise PaperAuditError(f"模拟账户 {account_id} 的估值开盘价无效")
             elif str(event_type) == "SIGNAL_GENERATED":
                 target = payload.get("target_position")
                 if target is not None:
@@ -1016,9 +1379,11 @@ class PaperStore:
                 )
                 assert pending_order is not None
                 attempt_count_raw = payload.get("attempt_count")
-                if attempt_count_raw is not None and _as_int(
-                    attempt_count_raw, "订单成交尝试次数"
-                ) != pending_order.attempt_count + 1:
+                if (
+                    attempt_count_raw is not None
+                    and _as_int(attempt_count_raw, "订单成交尝试次数")
+                    != pending_order.attempt_count + 1
+                ):
                     raise PaperAuditError(f"模拟账户 {account_id} 的订单成交尝试次数无效")
                 pending_order = None
             elif str(event_type) in {
@@ -1052,10 +1417,7 @@ class PaperStore:
                     raise PaperAuditError(f"模拟账户 {account_id} 的份额调整事件无效")
                 if str(event_type) == "SHARE_ADJUSTMENT_APPLIED" and shares_before <= 0:
                     raise PaperAuditError(f"模拟账户 {account_id} 的份额调整事件类型无效")
-                if (
-                    str(event_type) == "SHARE_ADJUSTMENT_NOT_APPLICABLE"
-                    and shares_before != 0
-                ):
+                if str(event_type) == "SHARE_ADJUSTMENT_NOT_APPLICABLE" and shares_before != 0:
                     raise PaperAuditError(f"模拟账户 {account_id} 的份额调整观察事件无效")
                 seen_share_adjustment_ids.add(action_id)
             elif str(event_type) == "CASH_DISTRIBUTION_NOT_ENTITLED":
@@ -1223,9 +1585,7 @@ def _event_body(
 
 
 def _event_hash(previous_event_hash: str, body: dict[str, object]) -> str:
-    canonical = _canonical_json(
-        {"previous_event_hash": previous_event_hash, "event": body}
-    )
+    canonical = _canonical_json({"previous_event_hash": previous_event_hash, "event": body})
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -1403,9 +1763,7 @@ def _account_from_row(row: tuple[object, ...]) -> PaperAccount:
         name=cast(PaperStrategyName, strategy),
         short_window=_optional_int(parameters.get("short_window"), "短期均线窗口"),
         long_window=_optional_int(parameters.get("long_window"), "长期均线窗口"),
-        momentum_lookback=_optional_int(
-            parameters.get("momentum_lookback"), "动量回看窗口"
-        ),
+        momentum_lookback=_optional_int(parameters.get("momentum_lookback"), "动量回看窗口"),
     )
     ledger_config = LedgerConfig(
         initial_cash=_as_float(initial_cash, "账户初始现金"),
@@ -1555,11 +1913,7 @@ def _distribution_event_fields(
     record_date = _as_date(payload["record_date"])
     payment_date = _as_date(payload["payment_date"])
     cash_per_share = _as_float(payload.get("cash_per_share"), f"{label}每份金额")
-    if (
-        record_date > payment_date
-        or not math.isfinite(cash_per_share)
-        or cash_per_share <= 0.0
-    ):
+    if record_date > payment_date or not math.isfinite(cash_per_share) or cash_per_share <= 0.0:
         raise PaperAuditError(f"{label}的数值或日期无效")
     return action_id, record_date, payment_date, cash_per_share, source_url
 
@@ -1763,9 +2117,7 @@ def _validate_stored_account_configuration(
         engine_version,
     ) = row
     strategy_name = _required_string({"strategy": strategy}, "strategy", "账户锁定配置")
-    strategy_parameters = _load_canonical_object(
-        str(strategy_parameters_json), "账户锁定策略参数"
-    )
+    strategy_parameters = _load_canonical_object(str(strategy_parameters_json), "账户锁定策略参数")
     if strategy_parameters.get("name") != strategy_name:
         raise PaperAuditError("账户锁定配置中的策略字段不一致")
     expected_hash = hashlib.sha256(
@@ -1780,9 +2132,7 @@ def _validate_stored_account_configuration(
                     "initial_cash": _as_float(initial_cash, "账户锁定初始现金"),
                     "lot_size": _as_int(lot_size, "账户锁定每手数量"),
                     "commission_bps": _as_float(commission_bps, "账户锁定佣金"),
-                    "minimum_commission": _as_float(
-                        minimum_commission, "账户锁定最低佣金"
-                    ),
+                    "minimum_commission": _as_float(minimum_commission, "账户锁定最低佣金"),
                     "sell_tax_bps": _as_float(sell_tax_bps, "账户锁定卖出税费"),
                     "slippage_bps": _as_float(slippage_bps, "账户锁定滑点"),
                 },

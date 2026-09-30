@@ -10,11 +10,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
+from finance_lab.atomic_io import write_file_atomic, write_text_atomic
 from finance_lab.config import ProjectPaths
 from finance_lab.execution_feasibility import (
     ExecutionFeasibilityResult,
     ExecutionScenario,
 )
+from finance_lab.report_bundle import publish_report_bundle
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -105,8 +107,12 @@ def _write_chart(result: ExecutionFeasibilityResult, chart_path: Path) -> None:
             fontsize=9,
         )
     figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
+    try:
+        write_file_atomic(
+            chart_path, lambda temporary: figure.savefig(temporary, dpi=150, format="png")
+        )
+    finally:
+        plt.close(figure)
 
 
 def write_execution_feasibility_report(
@@ -123,7 +129,10 @@ def write_execution_feasibility_report(
         [scenario.events for scenario in result.scenarios],
         ignore_index=True,
     )
-    events.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    write_file_atomic(
+        csv_path,
+        lambda temporary: events.to_csv(temporary, index=False, encoding="utf-8-sig"),
+    )
     _write_chart(result, chart_path)
 
     instrument_warning = (
@@ -183,7 +192,7 @@ def write_execution_feasibility_report(
 </body>
 </html>
 """
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
     payload = {
         "settings": result.settings_dict(),
         "benchmark_metrics": result.benchmark_metrics.to_dict(),
@@ -206,8 +215,6 @@ def write_execution_feasibility_report(
             "Historical results are not investment advice.",
         ],
     }
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
+    write_text_atomic(json_path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    publish_report_bundle(html_path, (html_path, chart_path, json_path, csv_path))
     return html_path, chart_path, json_path, csv_path

@@ -5,6 +5,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+smoke-venv/
 .planning/
 package_staging_*/
 package_verify_*/
@@ -13,6 +18,8 @@ data/raw/
 data/curated/
 data/*.duckdb
 data/paper_trading.lock
+data/market_data.lock
+data/market_update_state.json
 outputs/*.png
 outputs/*.html
 outputs/*.json

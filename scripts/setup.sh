@@ -37,7 +37,7 @@ else
     "$SYSTEM_PYTHON" -m venv .venv
 fi
 
-"$VENV_PYTHON" -m pip install pip==26.2.1 setuptools==80.9.0 wheel==0.45.1
+"$VENV_PYTHON" -m pip install pip==26.2.1 setuptools==83.0.0 wheel==0.46.2
 "$VENV_PYTHON" -m pip install -r requirements-lock.txt
 "$VENV_PYTHON" -m pip install --no-build-isolation --no-deps -e .
 
