@@ -20,6 +20,8 @@ from finance_lab.data_manifest import (
     read_update_summary,
 )
 from finance_lab.ledger import LedgerConfig
+from finance_lab.market_data_lock import market_data_lock
+from finance_lab.market_data_state import assert_market_data_readable, assert_not_research_session
 from finance_lab.paper_engine import advance_one_bar, initialize_account
 from finance_lab.paper_lock import paper_run_lock
 from finance_lab.paper_models import (
@@ -48,6 +50,19 @@ class PaperPortfolioNotFound(RuntimeError):
     exit_code = 4
 
 
+class PaperReportWriteError(RuntimeError):
+    """Report generation failed after the ledger operation completed."""
+
+    def __init__(self, operation: PaperOperationResult) -> None:
+        self.portfolio_id = operation.portfolio_id
+        self.operation_status = operation.status
+        self.processed_dates = operation.processed_dates
+        self.ledger_committed = operation.status in {"initialized", "processed"} and bool(
+            operation.processed_dates
+        )
+        super().__init__("模拟盘报告未完整发布；账本状态已保留")
+
+
 @dataclass(frozen=True)
 class PaperMarketSnapshot:
     prices: pd.DataFrame
@@ -60,6 +75,16 @@ def load_paper_market_snapshot(
     stale_after_business_days: int,
 ) -> PaperMarketSnapshot:
     """Load the one approved ETF only when its complete local lineage is healthy."""
+    with market_data_lock(paths.data):
+        assert_market_data_readable(paths)
+        return _load_paper_market_snapshot(paths, as_of_date, stale_after_business_days)
+
+
+def _load_paper_market_snapshot(
+    paths: ProjectPaths,
+    as_of_date: date,
+    stale_after_business_days: int,
+) -> PaperMarketSnapshot:
     target_symbol = "sh.510300"
     configured = next(
         (item for item in load_instruments(paths.root) if item.symbol == target_symbol),
@@ -143,6 +168,7 @@ def paper_init_portfolio(
     paths = _project_paths(root)
     effective_as_of_date = as_of_date or date.today()
     with paper_run_lock(paths.data / "paper_trading.lock"):
+        assert_not_research_session(paths)
         snapshot = load_paper_market_snapshot(
             paths,
             effective_as_of_date,
@@ -182,6 +208,7 @@ def paper_run_portfolio(
     paths = _project_paths(root)
     effective_as_of_date = as_of_date or date.today()
     with paper_run_lock(paths.data / "paper_trading.lock"):
+        assert_not_research_session(paths)
         snapshot = load_paper_market_snapshot(
             paths,
             effective_as_of_date,
@@ -385,5 +412,8 @@ def _batch_id(operation: str, portfolio_id: str, trade_date: date) -> str:
 
 
 def _with_report(operation: PaperOperationResult, paths: ProjectPaths) -> PaperOperationResult:
-    report_paths = write_paper_report(operation, paths)
+    try:
+        report_paths = write_paper_report(operation, paths)
+    except Exception as exc:
+        raise PaperReportWriteError(operation) from exc
     return replace(operation, report_path=report_paths.latest_html)

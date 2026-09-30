@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from numbers import Number
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,15 @@ class DataValidationError(ValueError):
     pass
 
 
+def parse_trade_dates(values: pd.Series) -> pd.Series:
+    """Parse mixed date representations without accepting numeric epoch aliases."""
+    try:
+        dates = pd.to_datetime(values, errors="coerce", format="mixed", utc=True)
+    except (TypeError, ValueError, OverflowError):
+        dates = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns, UTC]")
+    return dates.mask(values.map(lambda value: isinstance(value, Number)))
+
+
 def validate_daily_prices(frame: pd.DataFrame) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     missing = [column for column in CANONICAL_COLUMNS if column not in frame.columns]
@@ -30,12 +40,17 @@ def validate_daily_prices(frame: pd.DataFrame) -> list[ValidationIssue]:
     if frame.empty:
         return [ValidationIssue("error", "empty_data", "数据为空")]
 
-    if frame.duplicated(["symbol", "trade_date"]).any():
+    dates = parse_trade_dates(frame["trade_date"])
+    valid_dates = dates.notna()
+    keys = pd.DataFrame({"symbol": frame["symbol"], "trade_date": dates})
+    if keys.loc[valid_dates].duplicated(["symbol", "trade_date"]).any():
         issues.append(ValidationIssue("error", "duplicate_key", "存在重复的标的与交易日"))
-    if not frame["trade_date"].is_monotonic_increasing:
+    if not dates.loc[valid_dates].is_monotonic_increasing:
         issues.append(ValidationIssue("error", "date_order", "交易日期没有升序排列"))
-    if frame["trade_date"].isna().any():
+    if not valid_dates.all():
         issues.append(ValidationIssue("error", "invalid_date", "存在无法解析的交易日期"))
+    if dates.loc[valid_dates].ne(dates.loc[valid_dates].dt.normalize()).any():
+        issues.append(ValidationIssue("error", "non_daily_date", "日线日期包含非零时间"))
 
     price_columns = ["open", "high", "low", "close"]
     prices = frame[price_columns].apply(pd.to_numeric, errors="coerce")
@@ -69,7 +84,7 @@ def validate_daily_prices(frame: pd.DataFrame) -> list[ValidationIssue]:
     ):
         issues.append(ValidationIssue("error", "invalid_amount", "成交额存在空值、非有限值或负数"))
 
-    gaps = frame["trade_date"].sort_values().diff().dt.days.dropna()
+    gaps = dates.loc[valid_dates].sort_values().diff().dt.days.dropna()
     if not gaps.empty and int(gaps.max()) > 15:
         issues.append(ValidationIssue("warning", "large_date_gap", "相邻交易日间隔超过15天"))
     return issues

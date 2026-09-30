@@ -26,6 +26,36 @@ def test_duplicate_key_is_detected() -> None:
     assert "duplicate_key" in codes
 
 
+@pytest.mark.parametrize("bad_date", ["not-a-date", None, "2026-02-30", 0, True])
+def test_invalid_trade_date_is_reported_without_crashing(bad_date: object) -> None:
+    frame = make_synthetic_daily_prices(periods=150)
+    frame["trade_date"] = frame["trade_date"].dt.strftime("%Y-%m-%d")
+    frame.loc[5, "trade_date"] = bad_date
+
+    codes = {issue.code for issue in validate_daily_prices(frame)}
+
+    assert "invalid_date" in codes
+
+
+def test_daily_date_rejects_nonzero_time() -> None:
+    frame = make_synthetic_daily_prices(periods=150)
+    frame.loc[5, "trade_date"] += np.timedelta64(1, "h")
+
+    codes = {issue.code for issue in validate_daily_prices(frame)}
+
+    assert "non_daily_date" in codes
+
+
+def test_duplicate_key_uses_parsed_trade_dates() -> None:
+    frame = make_synthetic_daily_prices(periods=150)
+    frame["trade_date"] = frame["trade_date"].dt.strftime("%Y-%m-%d")
+    frame.loc[1, "trade_date"] = frame.loc[0, "trade_date"] + "T00:00:00"
+
+    codes = {issue.code for issue in validate_daily_prices(frame)}
+
+    assert "duplicate_key" in codes
+
+
 @pytest.mark.parametrize(
     ("column", "expected_code"),
     [

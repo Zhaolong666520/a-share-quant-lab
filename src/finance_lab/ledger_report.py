@@ -10,8 +10,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from finance_lab.atomic_io import write_file_atomic, write_text_atomic
 from finance_lab.config import ProjectPaths
 from finance_lab.ledger import AccountLedgerResult
+from finance_lab.report_bundle import publish_report_bundle
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -33,8 +35,14 @@ def write_account_ledger_report(
     csv_path = paths.outputs / f"{stem}_trades.csv"
     daily_csv_path = paths.outputs / f"{stem}_daily_ledger.csv"
     chart_path = paths.outputs / f"{stem}_equity.png"
-    result.trades.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    result.frame.to_csv(daily_csv_path, index=False, encoding="utf-8-sig")
+    write_file_atomic(
+        csv_path,
+        lambda temporary: result.trades.to_csv(temporary, index=False, encoding="utf-8-sig"),
+    )
+    write_file_atomic(
+        daily_csv_path,
+        lambda temporary: result.frame.to_csv(temporary, index=False, encoding="utf-8-sig"),
+    )
 
     figure, axis = plt.subplots(figsize=(10, 5.6))
     axis.plot(result.frame["return_end_date"], result.frame["equity"], label="Strategy")
@@ -49,8 +57,12 @@ def write_account_ledger_report(
     axis.grid(alpha=0.25)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
+    try:
+        write_file_atomic(
+            chart_path, lambda temporary: figure.savefig(temporary, dpi=150, format="png")
+        )
+    finally:
+        plt.close(figure)
 
     config = result.config
     if result.data_health:
@@ -114,7 +126,7 @@ SHA-256：<code>{html.escape(result.curated_file_sha256 or '未由正式流水�
 <p><a href="{html.escape(csv_path.name)}">打开逐笔成交账本CSV</a>；
 <a href="{html.escape(daily_csv_path.name)}">打开逐日账户账本CSV</a></p>
 </body></html>"""
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
     payload = {
         "settings": result.settings_dict(),
         "metrics": result.metrics.to_dict(),
@@ -132,8 +144,8 @@ SHA-256：<code>{html.escape(result.curated_file_sha256 or '未由正式流水�
             "Historical results are not investment advice.",
         ],
     }
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
+    write_text_atomic(json_path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    publish_report_bundle(
+        html_path, (html_path, json_path, csv_path, daily_csv_path, chart_path)
     )
     return html_path, json_path, csv_path, daily_csv_path, chart_path

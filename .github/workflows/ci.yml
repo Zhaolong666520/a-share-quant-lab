@@ -14,6 +14,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  storage-portability:
+    name: Storage acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install locked dependencies
+        run: python -m pip install -r requirements-lock.txt
+      - name: Install project
+        run: python -m pip install --no-build-isolation --no-deps -e .
+      - name: Filename, ledger, recovery and frozen-session acceptance
+        run: python -m pytest tests/test_filename_audit.py tests/test_storage_portability.py tests/test_paper_schema_contract.py tests/test_paper_store.py tests/test_recovery_ledger.py tests/test_workspace_acceptance.py --junitxml=storage-acceptance.xml
+      - name: Preserve platform evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-acceptance-${{ matrix.os }}
+          path: storage-acceptance.xml
+
   quality:
     runs-on: windows-latest
     timeout-minutes: 20
@@ -96,8 +123,37 @@ jobs:
         run: |
           python -m venv smoke-venv
           smoke-venv/bin/python -m pip install dist/*.whl
-          smoke-venv/bin/python -c "import finance_lab; print(finance_lab.__version__)"
-          smoke-venv/bin/finance-lab --help
+          smoke-venv/bin/python -m pip check
+          export FINANCE_LAB_ROOT="$RUNNER_TEMP/finance-lab-wheel-smoke"
+          smoke-venv/bin/finance-lab init
+          smoke-venv/bin/finance-lab demo
+          smoke-venv/bin/python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          import finance_lab
+          from finance_lab.config import load_instruments, project_root
+          from finance_lab.report_bundle import verify_report_bundle
+          from finance_lab.trading_calendar import load_project_sse_trading_calendar
+
+          root = project_root()
+          output = root / "outputs"
+          stem = "demo_000300_sma"
+          required = (
+              output / f"{stem}_report.html",
+              output / f"{stem}_equity.csv",
+              output / f"{stem}_metrics.json",
+              output / f"{stem}_equity.png",
+          )
+          assert all(path.is_file() for path in required)
+          assert len(load_instruments(root)) == 2
+          assert load_project_sse_trading_calendar(root).coverage_end.year == 2026
+          assert verify_report_bundle(required[0])["ok"]
+          package = Path(finance_lab.__file__).resolve().parent
+          assert package.is_relative_to(Path(sys.prefix).resolve())
+          assert not (package / "data").exists()
+          assert not (package / "outputs").exists()
+          PY
 
   posix-demo:
     name: demo (${{ matrix.os }})

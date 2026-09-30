@@ -6,10 +6,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from finance_lab import atomic_io
 from finance_lab.backtest import run_backtest
 from finance_lab.config import get_paths
 from finance_lab.experiment import run_split_experiment
 from finance_lab.experiment_report import write_split_experiment_report
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 
 
@@ -47,11 +49,66 @@ def test_experiment_report_creates_html_json_chart_and_trades(tmp_path: Path) ->
     result = run_split_experiment(prices, split_date=date(2024, 1, 1))
     outputs = write_split_experiment_report(result, get_paths(tmp_path))
     assert all(path.exists() for path in outputs)
+    assert verify_report_bundle(outputs[0])["files_checked"] == len(outputs)
     assert "样本外" in outputs[0].read_text(encoding="utf-8")
+    assert outputs[1].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert outputs[3].read_bytes().startswith(b"\xef\xbb\xbf")
     trades_csv = outputs[3].read_text(encoding="utf-8-sig")
     assert "experiment_period" in trades_csv
     assert "signal_date" in trades_csv
     assert "decision_signal" in trades_csv
+
+
+@pytest.mark.parametrize("target_index", [0, 2], ids=["html", "json"])
+def test_report_text_replace_failure_preserves_prior_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_index: int,
+) -> None:
+    prices = make_synthetic_daily_prices(periods=900)
+    result = run_split_experiment(prices, split_date=date(2024, 1, 1))
+    paths = get_paths(tmp_path)
+    outputs = write_split_experiment_report(result, paths)
+    target = outputs[target_index]
+    previous = target.read_bytes()
+    original_replace = atomic_io.os.replace
+
+    def fail_target_replace(source: object, destination: object) -> None:
+        if Path(str(destination)) == target:
+            raise OSError("simulated report publish failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_target_replace)
+    with pytest.raises(OSError, match="simulated report publish failure"):
+        write_split_experiment_report(result, paths)
+    assert target.read_bytes() == previous
+    assert not list(paths.outputs.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("target_index", [1, 3], ids=["chart_png", "trades_csv"])
+def test_report_asset_replace_failure_preserves_prior_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_index: int,
+) -> None:
+    prices = make_synthetic_daily_prices(periods=900)
+    result = run_split_experiment(prices, split_date=date(2024, 1, 1))
+    paths = get_paths(tmp_path)
+    outputs = write_split_experiment_report(result, paths)
+    target = outputs[target_index]
+    previous = target.read_bytes()
+    original_replace = atomic_io.os.replace
+
+    def fail_target_replace(source: object, destination: object) -> None:
+        if Path(str(destination)) == target:
+            raise OSError("simulated asset publish failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_target_replace)
+    with pytest.raises(OSError, match="simulated asset publish failure"):
+        write_split_experiment_report(result, paths)
+    assert target.read_bytes() == previous
+    assert not list(paths.outputs.glob(".*.tmp"))
 
 
 def test_development_metrics_do_not_consume_out_of_sample_prices() -> None:

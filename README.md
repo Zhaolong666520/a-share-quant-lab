@@ -8,6 +8,16 @@
 
 [简体中文](README.md) · [English quick start](docs/quickstart.en.md)
 
+开发中：[v1.0 设计与验收方案](docs/superpowers/specs/2026-09-18-v1-design.md) · [第一步实施计划与进度](docs/superpowers/plans/2026-09-18-parquet-publication.md)。方案中的后续功能尚未交付。
+
+最新本地进度：[数据源离线契约](docs/superpowers/plans/2026-09-25-source-contract.md)；此前已加入[离线行情候选重建](docs/superpowers/plans/2026-09-25-offline-market-rebuild.md)、[恢复材料准备与校验](docs/superpowers/plans/2026-09-23-market-recovery-copy.md)、[未完成批次隔离](docs/superpowers/plans/2026-09-20-incomplete-market-update.md)、[行情并发访问保护](docs/superpowers/plans/2026-09-18-market-data-lock.md)与[标的身份校验](docs/superpowers/plans/2026-09-18-symbol-identity.md)。
+
+遇到“行情更新状态不可用”，先运行 `finance-lab data-update-status` 只读诊断。恢复材料命令可保存现场；离线候选重建命令可从明确指定的原始快照生成并复核新目录。候选不会自动解除隔离或切换正式项目，详见[数据说明](docs/数据说明.md)。
+
+新增本地能力：人工确认候选后验收至独立项目目录；一次冻结完整研究会话，让后续 15 个研究命令通过 `--session` 共用同一份数据和配置。使用方法及切换/回退协议见[恢复验收与研究会话](docs/恢复验收与研究会话.md)。
+
+账本已补完整结构契约、非空旧版本迁移和异常回滚验收；跨系统存储 CI 已配置，但 Linux/macOS 尚未实跑，详见[账本结构与跨平台验收](docs/账本结构与跨平台验收.md)。
+
 ![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 
 一个面向初学者的、**可复现且可审计**的 A 股量化研究实验室。它不负责告诉你“明天买什么”，而是帮助你把数据来源、实验参数、交易成本、执行限制和现金账本逐项对清楚。
@@ -88,6 +98,11 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli demo
 ```
 
+若通过 wheel 安装，在准备存放数据与报告的目录运行 `finance-lab init` 可创建示例
+`config/instruments.json`；已有配置不会被覆盖。随后运行 `finance-lab demo`，会在当前目录的
+`outputs/` 生成合成数据演示的 HTML、CSV、JSON 和曲线图。需要固定工作目录时设置
+`FINANCE_LAB_ROOT`；离线演示不需要行情接口。
+
 验证整个项目：
 
 ```powershell
@@ -122,6 +137,7 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli fetch --start 2018-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli validate
 .\.venv\Scripts\python.exe -m finance_lab.cli backtest --symbol sh.000300
+.\.venv\Scripts\python.exe -m finance_lab.cli report-verify --report outputs\sh_000300_sma_report.html
 .\.venv\Scripts\python.exe -m finance_lab.cli experiment-all --split-date 2023-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli walk-forward-all --first-oos-date 2021-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli cost-stress-all --costs 5,10,20,50
@@ -135,6 +151,37 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-status
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-daily
 ```
+
+多条只读研究命令若要锁定同一代行情，先运行 `manifest`，从输出中复制完整的
+64 位 `dataset_id`，记录在实验文档里，再给后续命令逐条传入相同 ID：
+
+```powershell
+.\.venv\Scripts\python.exe -m finance_lab.cli manifest
+$datasetId = "把 manifest 输出中的完整 64 位 dataset_id 粘贴在这里"
+.\.venv\Scripts\python.exe -m finance_lab.cli dataset-check --expected-dataset-id $datasetId
+.\.venv\Scripts\python.exe -m finance_lab.cli backtest --symbol sh.000300 --expected-dataset-id $datasetId
+.\.venv\Scripts\python.exe -m finance_lab.cli experiment-all --expected-dataset-id $datasetId
+```
+
+请先把字符串占位内容换成实际 ID。`dataset-check` 不生成报告，成功时返回一个 JSON，
+包含 `status=verified`、数据集 ID、健康状态、文件数和行数；健康状态为警告仍可核验，
+但不等于数据足够新或适合正式实验。若行情在两条命令之间改变，后续命令会在生成报告前
+以 `dataset_id_mismatch` 非零退出；数据无法核验或健康状态为错误时也不会生成新报告。
+单独运行 `dataset-check` 只证明检查当刻的状态，不会冻结跨命令数据；后续每条研究命令仍需传入同一 ID。
+外部程序绕过项目行情锁直接写文件时，
+仍须人工核对原始数据和报告。会更新行情的 `all` 不支持这个选项。
+
+跨平台移动旧行情前，可运行只读文件名审计：
+
+```powershell
+.\.venv\Scripts\python.exe -m finance_lab.cli filename-audit
+```
+
+它只列举 `data/curated` 中的直接子项，报告非规范 Parquet 候选名、可能在
+Windows/macOS/Linux 间混淆的大小写/Unicode/尾部点空格别名，以及伪装成 Parquet 的
+目录或符号链接。发现风险时非零退出，不自动改名、删除或读取行情内容；无风险也不代表
+数据健康或来源正确，仍需运行 `validate` 和 `manifest`。旧 `.tmp.parquet` 暂存文件
+只计数，不会被清理。
 
 ### 输出文件
 
@@ -189,7 +236,7 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 - 模拟盘风险门禁采用公开固定的教学阈值，只判断是否值得延长模拟观察；即使通过也不授权真实交易、不证明未来盈利。
 - 前向标的基准只表示同日期的不复权收盘价变化，不包含分红或份额调整；账户与基准的差异是百分点差，不是 alpha。
 - 逐日观察历史只从已提交估值事件重建；20/60/120/252 日里程碑衡量样本积累，不代表策略有效或可投入真实资金。
-- `paper-daily` 会依次更新数据、检查健康状态并运行模拟盘；每次成功或失败都会留下 JSON 与日志，失败返回非零退出码。Windows 计划任务只能在稳定项目目录安装，不能指向 `.worktrees`。
+- `paper-daily` 只有在行情更新明确返回完整成功且失败来源数为 0 后，才检查数据健康并推进模拟盘；失败返回非零退出码。状态写入成功时会留下 JSON 归档与 latest 状态；若状态写入本身失败，归档可能不存在，不能据此判断行情或账本未发生变化。先运行 `data-update-status`，必要时再运行 `paper-status` 审计，确认后才决定是否重试。Windows 计划任务只能在稳定项目目录安装，不能指向 `.worktrees`。
 
 ## 路线图
 

@@ -24,6 +24,7 @@ def test_demo_creates_report_without_network(tmp_path: Path) -> None:
     html_path, metrics = create_demo_report(tmp_path)
     assert html_path.exists()
     assert "合成演示数据" in html_path.read_text(encoding="utf-8")
+    assert (tmp_path / "outputs" / "demo_000300_sma_equity.csv").is_file()
     assert int(metrics["observations"]) > 100
 
 

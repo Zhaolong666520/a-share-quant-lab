@@ -9,8 +9,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from finance_lab.atomic_io import write_file_atomic, write_text_atomic
 from finance_lab.backtest import BacktestMetrics, BacktestResult
 from finance_lab.config import ProjectPaths
+from finance_lab.report_bundle import publish_report_bundle
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -56,6 +58,7 @@ def write_backtest_report(
 ) -> tuple[Path, Path, Path]:
     stem = f"{_safe_symbol(result.symbol)}_{result.strategy}"
     chart_path = paths.outputs / f"{stem}_equity.png"
+    csv_path = paths.outputs / f"{stem}_equity.csv"
     html_path = paths.outputs / f"{stem}_report.html"
     json_path = paths.outputs / f"{stem}_metrics.json"
 
@@ -73,8 +76,19 @@ def write_backtest_report(
     axis.grid(alpha=0.25)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
+    try:
+        write_file_atomic(
+            chart_path, lambda temporary: figure.savefig(temporary, dpi=150, format="png")
+        )
+    finally:
+        plt.close(figure)
+
+    write_file_atomic(
+        csv_path,
+        lambda temporary: result.frame[
+            ["trade_date", "equity", "benchmark_equity"]
+        ].to_csv(temporary, index=False),
+    )
 
     sources = sorted(str(value) for value in result.frame["source"].dropna().unique())
     source = ", ".join(sources)
@@ -120,7 +134,7 @@ def write_backtest_report(
 </body>
 </html>
 """
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
     payload = {
         "symbol": result.symbol,
         "strategy": result.strategy,
@@ -134,5 +148,6 @@ def write_backtest_report(
         "metrics": result.metrics.to_dict(),
         "benchmark_metrics": result.benchmark_metrics.to_dict(),
     }
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text_atomic(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    publish_report_bundle(html_path, (html_path, chart_path, csv_path, json_path))
     return html_path, chart_path, json_path
