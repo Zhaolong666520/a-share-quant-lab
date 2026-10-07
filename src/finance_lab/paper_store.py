@@ -23,8 +23,10 @@ from finance_lab.paper_models import (
     EngineStep,
     PaperAccount,
     PaperAction,
+    PaperBatchCommit,
     PaperDataContext,
     PaperEventDraft,
+    PaperRunReference,
     PaperState,
     PaperStrategyName,
     PendingOrder,
@@ -587,6 +589,18 @@ class PaperStore:
         *,
         batch_id: str,
     ) -> tuple[PaperState, ...]:
+        return self.initialize_portfolio_with_receipt(
+            accounts, steps, data_context, batch_id=batch_id
+        ).states
+
+    def initialize_portfolio_with_receipt(
+        self,
+        accounts: Sequence[PaperAccount],
+        steps: Sequence[EngineStep],
+        data_context: PaperDataContext,
+        *,
+        batch_id: str,
+    ) -> PaperBatchCommit:
         """Write immutable accounts and their first event batch atomically."""
         self._validate_batch(accounts, steps)
         portfolio_ids = {account.portfolio_id for account in accounts}
@@ -602,8 +616,10 @@ class PaperStore:
             for account in accounts:
                 self._insert_account(account)
             states = self._append_batch(accounts, steps, data_context, batch_id)
+            refs = self._read_batch_references(accounts, steps, data_context, batch_id)
+            result = PaperBatchCommit(states=states, run_refs=refs)
             connection.execute("COMMIT")
-            return states
+            return result
         except BaseException:
             connection.execute("ROLLBACK")
             raise
@@ -616,6 +632,18 @@ class PaperStore:
         *,
         batch_id: str,
     ) -> tuple[PaperState, ...]:
+        return self.commit_batch_with_receipt(
+            accounts, steps, data_context, batch_id=batch_id
+        ).states
+
+    def commit_batch_with_receipt(
+        self,
+        accounts: Sequence[PaperAccount],
+        steps: Sequence[EngineStep],
+        data_context: PaperDataContext,
+        *,
+        batch_id: str,
+    ) -> PaperBatchCommit:
         """Append one validated trade-date batch for all supplied accounts atomically."""
         self._validate_batch(accounts, steps)
         connection = self._require_connection()
@@ -624,11 +652,81 @@ class PaperStore:
         try:
             self._assert_existing_accounts_match(accounts)
             states = self._append_batch(accounts, steps, data_context, batch_id)
+            refs = self._read_batch_references(accounts, steps, data_context, batch_id)
+            result = PaperBatchCommit(states=states, run_refs=refs)
             connection.execute("COMMIT")
-            return states
+            return result
         except BaseException:
             connection.execute("ROLLBACK")
             raise
+
+    def _read_batch_references(
+        self, accounts: Sequence[PaperAccount], steps: Sequence[EngineStep],
+        data_context: PaperDataContext, batch_id: str,
+    ) -> tuple[PaperRunReference, ...]:
+        day = steps[0].state.last_trade_date
+        ids = {a.account_id for a in accounts}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._require_connection().execute(
+            "SELECT run_id, batch_id, account_id, trade_date, dataset_id, curated_sha256, "
+            "state_hash, status FROM paper_runs WHERE batch_id = ? AND trade_date = ? "
+            f"AND account_id IN ({placeholders}) ORDER BY trade_date, account_id",
+            [batch_id, day, *sorted(ids)],
+        ).fetchall()
+        if len(rows) != len(ids) or {r[2] for r in rows} != ids or any(
+            r[1] != batch_id or r[3] != day or r[4] != data_context.dataset_id
+            or r[5] != data_context.curated_sha256 or r[7] != "committed" for r in rows
+        ):
+            raise PaperStoreError("已写入批次的事务收据不完整或输入不一致")
+        refs = tuple(PaperRunReference(*r[:7]) for r in rows)
+        # Keep the storage API's historical opaque strings unchanged. Archive character
+        # policy is separate; transaction row/roster/input validation is complete here.
+        return refs
+
+    def correlate_run_references(
+        self, portfolio_id: str, ledger: dict[str, object],
+    ) -> dict[str, object]:
+        """Match historical receipts using the caller's existing audited read transaction."""
+        from finance_lab.paper_run_identity import parse_references
+        scope = ledger["scope"]
+        refs = parse_references(ledger["runs"])
+        connection = self._require_connection()
+        accounts = {r[0] for r in connection.execute(
+            "SELECT account_id FROM paper_accounts WHERE portfolio_id = ?", [portfolio_id]
+        ).fetchall()}
+        if scope == "unknown":
+            return {"status": "not_available", "scope": scope, "matched_runs": 0}
+        matched = 0
+        reason = None
+        for ref in refs:
+            row = connection.execute(
+                "SELECT r.run_id, r.batch_id, r.account_id, r.trade_date, r.dataset_id, "
+                "r.curated_sha256, r.state_hash, r.status, a.portfolio_id FROM paper_runs r "
+                "JOIN paper_accounts a ON a.account_id = r.account_id WHERE r.run_id = ?",
+                [ref.run_id],
+            ).fetchone()
+            expected = (
+                ref.run_id, ref.batch_id, ref.account_id, ref.trade_date,
+                ref.dataset_id, ref.curated_sha256, ref.state_hash, "committed", portfolio_id,
+            )
+            if row != expected:
+                reason = "reference_mismatch"
+                break
+            matched += 1
+        for day in {r.trade_date for r in refs}:
+            listed = {r.account_id for r in refs if r.trade_date == day}
+            stored = {r[0] for r in connection.execute(
+                "SELECT r.account_id FROM paper_runs r JOIN paper_accounts a "
+                "ON a.account_id = r.account_id WHERE a.portfolio_id = ? "
+                "AND r.trade_date = ? AND r.status = 'committed'", [portfolio_id, day]
+            ).fetchall()}
+            if listed != accounts or stored != accounts:
+                reason = "account_set_mismatch"
+        status = "mismatch" if reason else (
+            "partial_verified" if scope == "partial" else "verified" if refs else "no_new_commits"
+        )
+        return {"status": status, "scope": scope, "matched_runs": matched,
+                "referenced_runs": len(refs), "reason": reason}
 
     def _insert_account(self, account: PaperAccount) -> None:
         self._require_connection().execute(

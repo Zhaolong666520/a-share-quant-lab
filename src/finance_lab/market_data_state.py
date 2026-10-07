@@ -127,6 +127,11 @@ def _validate_payload(payload: Any) -> MarketUpdateState:
     return MarketUpdateState(**{**payload, "symbols": tuple(symbols)})
 
 
+def parse_market_update_state(payload: object) -> MarketUpdateState:
+    """Validate already captured payload without reading paths or acquiring a lock."""
+    return _validate_payload(payload)
+
+
 def _read_state(paths: ProjectPaths) -> MarketUpdateState | None:
     path = _state_path(paths)
     try:

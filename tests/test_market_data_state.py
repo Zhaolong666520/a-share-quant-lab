@@ -19,6 +19,15 @@ from finance_lab.paper_pipeline import load_paper_market_snapshot
 from tests.paper_helpers import make_paper_test_project
 
 
+def test_public_payload_parser_without_paths() -> None:
+    import finance_lab.market_data_state as module
+    assert hasattr(module, "parse_market_update_state")
+    state = module.parse_market_update_state(_state_payload())
+    assert state.status == "updating"
+    with pytest.raises(ValueError):
+        module.parse_market_update_state({"schema_version": True})
+
+
 def _install_fetch(monkeypatch: pytest.MonkeyPatch, prices: pd.DataFrame) -> None:
     monkeypatch.setattr(pipeline, "fetch_akshare", lambda *args: prices.copy())
     monkeypatch.setattr(pipeline, "fetch_baostock", lambda *args: prices.copy())

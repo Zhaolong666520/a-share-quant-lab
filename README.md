@@ -8,6 +8,8 @@
 
 [简体中文](README.md) · [English quick start](docs/quickstart.en.md)
 
+当前本地能力、真实命令与历史验收证据见[当前成果与验收索引](docs/当前成果与验收索引.md)。本地版本仍为 0.9.1；开发成果不等于已发布，P3 真实持续运行及 P4/P5 仍未完成。
+
 开发中：[v1.0 设计与验收方案](docs/superpowers/specs/2026-09-18-v1-design.md) · [第一步实施计划与进度](docs/superpowers/plans/2026-09-18-parquet-publication.md)。方案中的后续功能尚未交付。
 
 最新本地进度：[数据源离线契约](docs/superpowers/plans/2026-09-25-source-contract.md)；此前已加入[离线行情候选重建](docs/superpowers/plans/2026-09-25-offline-market-rebuild.md)、[恢复材料准备与校验](docs/superpowers/plans/2026-09-23-market-recovery-copy.md)、[未完成批次隔离](docs/superpowers/plans/2026-09-20-incomplete-market-update.md)、[行情并发访问保护](docs/superpowers/plans/2026-09-18-market-data-lock.md)与[标的身份校验](docs/superpowers/plans/2026-09-18-symbol-identity.md)。
@@ -17,6 +19,8 @@
 新增本地能力：人工确认候选后验收至独立项目目录；一次冻结完整研究会话，让后续 15 个研究命令通过 `--session` 共用同一份数据和配置。使用方法及切换/回退协议见[恢复验收与研究会话](docs/恢复验收与研究会话.md)。
 
 账本已补完整结构契约、非空旧版本迁移和异常回滚验收；Windows、Ubuntu、macOS 存储验收均已实跑通过，详见[账本结构与跨平台验收](docs/账本结构与跨平台验收.md)。
+
+按[运行恢复与每日可靠性计划](docs/superpowers/plans/2026-10-04-operational-recovery.md)，已完成材料保存、人工确认后的独立离线恢复验收及 U4 只读状态读取器的[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。新增[运行身份关联](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)和[区间验收工具](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)，核对完整新归档、实际提交和重复无新增；正式恢复运行仍待后续，实际项目及计划任务未切换。
 
 ![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 
@@ -151,6 +155,46 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-status
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-daily
 ```
+
+查看每日运行、行情发布和模拟账本的只读汇总：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_operational_status --root . --portfolio default
+```
+
+从项目目录运行上述命令；其他项目请显式替换 `--root`，账户组按实际名称填写。
+输出为 JSON，分别列出最近有记录的运行、最后有效成功、账本最后估值、行情发布和报告生成记录。
+退出码 `0` 表示记录检查通过，`1` 表示存在失败、未知或需要注意的情况，`2` 表示请求错误。
+它不生成报告、不补建目录或锁、不更新行情或账户；原 `paper-status` 仍用于审计并重建报告。
+缺少运行归档会显示历史不可用；报告失败也可能已成功记账，不能据此重复初始化账户。
+
+这是非原子的本地观察，不能确认当前行情健康、调度器运行或报告文件完整性；
+旧字段保持未知，离线恢复保留来源提示。新运行归档保存独立 `attempt_id` 和实际事务收据；
+只读入口精确核对历史账本行，不按日期或最新行猜测归属，也不会跳过较新的坏归档。
+`automation_ledger_correlation` 区分完整匹配 `verified`、已知部分匹配 `partial_verified`、
+无新增 `no_new_commits`、明确不匹配 `mismatch`，以及未知/不可验证。
+部分匹配不代表整次成功；报告失败也可能已经记账。旧归档或缺少收据仍为 `not_available`。
+身份在最终归档才持久化，提交后到归档前被强制终止仍可能缺证，不应据此自动重跑。
+完整契约与验证边界见[运行身份计划](docs/superpowers/plans/2026-10-05-run-identity.md)
+及[验收记录](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)。
+设计与本批验收范围见[U4 设计](docs/superpowers/specs/2026-10-04-paper-operational-status-design.md)
+和[第一组三分之一交付计划](docs/superpowers/plans/2026-10-04-first-third-execution.md)。
+
+验收一段每日模拟运行，可先捕获账本基线，再核对该区间全部新归档：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_run_acceptance capture --root C:\quant\recovered --portfolio default
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_run_acceptance verify --root C:\quant\recovered --portfolio default --baseline C:\quant\evidence\before.json --attempt-id 第一次完整attempt_id --attempt-id 末次完整attempt_id
+```
+
+路径与 ID 为示例；运行前将成功 capture 的 JSON 保存到根目录外，具体保存步骤见
+[恢复验收说明](docs/恢复验收与研究会话.md#三每日模拟运行的区间验收)。工具只输出 JSON，不会执行每日运行或写证据文件。
+verify 必须按发生顺序列出基线之后的全部新尝试，不能只挑成功记录；它核对旧历史未变、
+新增账本提交与收据完整对应，并要求正常处理后同一日期的末次重复执行确实没有新增提交。
+`passed`/`attention`/`unavailable` 分别表示本工具范围通过、证据不符合验收、证据不可用；
+退出码依次为 `0`/`1`/`1`，参数或基线协议错误为 `2`。完整计划与本地验证见
+[U5 区间验收计划](docs/superpowers/plans/2026-10-06-run-acceptance.md)及
+[交付记录](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)。这不验证真实进程退出码、调度器、实时健康或报告文件。
 
 多条只读研究命令若要锁定同一代行情，先运行 `manifest`，从输出中复制完整的
 64 位 `dataset_id`，记录在实验文档里，再给后续命令逐条传入相同 ID：

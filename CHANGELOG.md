@@ -6,6 +6,10 @@
 
 ### Added
 
+- 独立严格只读状态汇总入口 `python -B -m finance_lab.paper_operational_status`：区分最近运行、最后有效成功、行情发布/来源、账本估值与报告生成记录，不生成报告或补建目录/锁；[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。
+- schema2 运行归档的独立 `attempt_id`、实际事务提交收据及只读精确关联：区分完整、部分、无新增和未知，不按日期或最新行猜测；旧 schema1 归档不改写；[运行身份验收](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)。
+- 只读运行区间验收入口 `python -B -m finance_lab.paper_run_acceptance capture` / `verify`：捕获五表与归档基线，保护原历史，完整覆盖实际新增提交，核对末次同日期重复 no-op；[工具与隔离演练验收](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)。这些工具不代表正式恢复、持续调度、实时健康或报告文件验收；命令与剩余范围见[当前成果索引](docs/当前成果与验收索引.md)。
+
 - 账本完整结构契约与非空 v1 迁移验收：全部字段类型、空值、默认值及主键/唯一/CHECK 约束检查，提交前事件恢复一致性审计，错误版本及异常迁移安全拒绝/回滚。
 - Windows/Linux/macOS 存储验收 CI 及平台证据报告；三平台各 87 项通过、无失败或跳过。
 

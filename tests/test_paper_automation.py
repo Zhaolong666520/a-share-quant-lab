@@ -84,7 +84,7 @@ def test_daily_automation_records_successful_steps_and_outputs(tmp_path: Path) -
     archive = json.loads(result.archive_path.read_text(encoding="utf-8"))
     latest = json.loads(result.latest_path.read_text(encoding="utf-8"))
     assert latest == archive == result.payload
-    assert archive["schema_version"] == 1
+    assert archive["schema_version"] == 2
     assert archive["workflow"] == "paper_daily"
     assert archive["status"] == "success"
     assert archive["portfolio_id"] == "study-1"

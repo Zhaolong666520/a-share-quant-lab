@@ -28,6 +28,7 @@ from finance_lab.paper_models import (
     PaperAccount,
     PaperDataContext,
     PaperOperationResult,
+    PaperRunReference,
     PaperState,
     make_default_accounts,
 )
@@ -54,13 +55,28 @@ class PaperReportWriteError(RuntimeError):
     """Report generation failed after the ledger operation completed."""
 
     def __init__(self, operation: PaperOperationResult) -> None:
+        self.operation = operation
         self.portfolio_id = operation.portfolio_id
         self.operation_status = operation.status
         self.processed_dates = operation.processed_dates
+        self.ledger_runs = operation.ledger_runs
         self.ledger_committed = operation.status in {"initialized", "processed"} and bool(
             operation.processed_dates
         )
         super().__init__("模拟盘报告未完整发布；账本状态已保留")
+
+
+class PaperPartialOperationError(RuntimeError):
+    """A replay failed after one or more explicitly returned daily commits."""
+
+    def __init__(self, portfolio_id: str, processed_dates: tuple[date, ...],
+                 ledger_runs: tuple[PaperRunReference, ...]) -> None:
+        self.portfolio_id = portfolio_id
+        self.processed_dates = processed_dates
+        self.ledger_runs = ledger_runs
+        self.operation_status = "partial"
+        self.ledger_committed = True
+        super().__init__("模拟盘后续日期运行失败；仅已返回收据的日期确认提交")
 
 
 @dataclass(frozen=True)
@@ -182,7 +198,7 @@ def paper_init_portfolio(
         steps = tuple(initialize_account(account, snapshot.prices) for account in accounts)
         with PaperStore(paths.database) as store:
             store.ensure_schema()
-            states = store.initialize_portfolio(
+            committed = store.initialize_portfolio_with_receipt(
                 accounts,
                 steps,
                 snapshot.data_context,
@@ -192,8 +208,9 @@ def paper_init_portfolio(
             status="initialized",
             portfolio_id=portfolio_id,
             processed_dates=(snapshot.data_context.data_end_date,),
-            states=states,
+            states=committed.states,
             data_context=snapshot.data_context,
+            ledger_runs=committed.run_refs,
         )
         return _with_report(operation, paths)
 
@@ -205,6 +222,23 @@ def paper_run_portfolio(
     root: Path | None = None,
 ) -> PaperOperationResult:
     """Replay every unseen validated bar in one atomic two-account batch per date."""
+    refs: list[PaperRunReference] = []
+    dates: list[date] = []
+    try:
+        return _paper_run_portfolio(portfolio_id, as_of_date, stale_after_business_days,
+                                    root, refs, dates)
+    except PaperReportWriteError:
+        raise
+    except Exception as exc:
+        if refs:
+            raise PaperPartialOperationError(portfolio_id, tuple(dates), tuple(refs)) from exc
+        raise
+
+
+def _paper_run_portfolio(
+    portfolio_id: str, as_of_date: date | None, stale_after_business_days: int,
+    root: Path | None, ledger_runs: list[PaperRunReference], processed_dates: list[date],
+) -> PaperOperationResult:
     paths = _project_paths(root)
     effective_as_of_date = as_of_date or date.today()
     with paper_run_lock(paths.data / "paper_trading.lock"):
@@ -258,7 +292,6 @@ def paper_run_portfolio(
                     prices["trade_date"].dt.date > last_trade_date, "trade_date"
                 ]
             )
-            processed_dates: list[date] = []
             current_states = states
             for trade_date in unseen_dates:
                 history = prices.loc[prices["trade_date"].dt.date <= trade_date].copy()
@@ -272,12 +305,14 @@ def paper_run_portfolio(
                     )
                     for account, state in zip(accounts, current_states, strict=True)
                 )
-                current_states = store.commit_batch(
+                committed = store.commit_batch_with_receipt(
                     accounts,
                     steps,
                     snapshot.data_context,
                     batch_id=_batch_id("run", portfolio_id, trade_date),
                 )
+                current_states = committed.states
+                ledger_runs.extend(committed.run_refs)
                 processed_dates.append(trade_date)
         operation = PaperOperationResult(
             status="processed" if processed_dates else "no-op",
@@ -285,6 +320,7 @@ def paper_run_portfolio(
             processed_dates=tuple(processed_dates),
             states=current_states,
             data_context=snapshot.data_context,
+            ledger_runs=tuple(ledger_runs),
         )
         return _with_report(operation, paths)
 
@@ -414,6 +450,10 @@ def _batch_id(operation: str, portfolio_id: str, trade_date: date) -> str:
 def _with_report(operation: PaperOperationResult, paths: ProjectPaths) -> PaperOperationResult:
     try:
         report_paths = write_paper_report(operation, paths)
+        identity = {
+            "archive_json_name": report_paths.archive_json.name,
+            "archive_json_sha256": file_sha256(report_paths.archive_json),
+        }
     except Exception as exc:
         raise PaperReportWriteError(operation) from exc
-    return replace(operation, report_path=report_paths.latest_html)
+    return replace(operation, report_path=report_paths.latest_html, report_identity=identity)

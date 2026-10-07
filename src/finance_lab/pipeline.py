@@ -255,7 +255,12 @@ def update_market_data(
         with market_update_batch(
             paths, start, end, tuple(instrument.symbol for instrument in instruments),
         ) as batch:
-            return _update_market_data(start, end, paths, instruments, batch)
+            payload = _update_market_data(start, end, paths, instruments, batch)
+        payload["market_identity"] = {
+            "batch_id": batch.state.batch_id,
+            "summary_sha256": batch.state.summary_sha256,
+        }
+        return payload
 
 
 def _update_market_data(

@@ -13,10 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from finance_lab.config import get_paths
-from finance_lab.paper_models import PaperOperationResult, validate_portfolio_id
-from finance_lab.paper_pipeline import PaperPortfolioNotFound, PaperReportWriteError
+from finance_lab.paper_models import PaperOperationResult, PaperRunReference, validate_portfolio_id
+from finance_lab.paper_pipeline import (
+    PaperPartialOperationError,
+    PaperPortfolioNotFound,
+    PaperReportWriteError,
+)
+from finance_lab.paper_run_identity import (
+    references_json,
+    validate_health,
+    validate_market,
+    validate_report,
+    validate_run_identity,
+)
 
-PAPER_AUTOMATION_SCHEMA_VERSION = 1
+PAPER_AUTOMATION_SCHEMA_VERSION = 2
 
 UpdateAction = Callable[..., dict[str, Any]]
 HealthAction = Callable[..., tuple[Path, dict[str, object]]]
@@ -59,8 +70,12 @@ class PaperAutomationStatusWriteError(RuntimeError):
         processed_dates: list[str],
         archive_confirmed: bool,
         archive_path: Path | None,
+        attempt_id: str | None = None,
+        ledger_runs: tuple[PaperRunReference, ...] | None = None,
     ) -> None:
         self.portfolio_id = portfolio_id
+        self.attempt_id = attempt_id
+        self.ledger_runs = ledger_runs
         self.stage = stage
         self.market_data_committed = market_data_committed
         self.ledger_committed = ledger_committed
@@ -84,6 +99,7 @@ def run_paper_daily_automation(
     safe_portfolio = validate_portfolio_id(portfolio_id)
     effective_as_of = as_of_date or date.today()
     _validate_invocation(start_date, effective_as_of, stale_after_business_days)
+    attempt_id = uuid.uuid4().hex
     paths = get_paths(root)
     selected_actions = actions or _default_actions()
     selected_clock = clock or (lambda: datetime.now(UTC))
@@ -98,6 +114,9 @@ def run_paper_daily_automation(
     market_data_committed: bool | None = None
     operation: PaperOperationResult | None = None
     report_error: PaperReportWriteError | None = None
+    partial_error: PaperPartialOperationError | None = None
+    market_identity: dict[str, str] | None = None
+    health_identity: dict[str, str] | None = None
     error: dict[str, str] | None = None
     try:
         update_payload = selected_actions.update_market_data(
@@ -105,6 +124,7 @@ def run_paper_daily_automation(
             end=effective_as_of,
             root=root,
         )
+        market_identity = validate_market(update_payload.get("market_identity"))
         successful_instruments = _successful_instruments(update_payload)
         update_status = update_payload.get("status")
         if update_status in {"success", "partial_sources", "failed"}:
@@ -122,6 +142,17 @@ def run_paper_daily_automation(
             as_of_date=effective_as_of,
             stale_after_business_days=stale_after_business_days,
         )
+        if "dataset_id" in health_payload or "as_of_date" in health_payload:
+            candidate_health = validate_health({
+                "dataset_id": health_payload.get("dataset_id"),
+                "as_of_date": health_payload.get("as_of_date"),
+            })
+            if (
+                candidate_health is not None
+                and candidate_health["as_of_date"] != effective_as_of.isoformat()
+            ):
+                raise ValueError("健康输入日期不一致")
+            health_identity = candidate_health
         if not isinstance(health_path, Path):
             raise ValueError("数据健康步骤未返回报告路径")
         data_health_report_path = str(health_path)
@@ -157,7 +188,26 @@ def run_paper_daily_automation(
             operation = candidate
             steps.append({"name": current_step, "status": "succeeded"})
     except Exception as exc:  # The failure must be persisted before returning nonzero.
-        if isinstance(exc, PaperReportWriteError):
+        accepted_failure = False
+        if isinstance(exc, (PaperPartialOperationError, PaperReportWriteError)):
+            try:
+                if isinstance(exc, PaperPartialOperationError):
+                    if current_step != "paper_run" or not exc.ledger_runs:
+                        raise ValueError("部分收据只允许逐日运行失败")
+                    candidate = PaperOperationResult(
+                        "processed", exc.portfolio_id, exc.processed_dates, (), None,
+                        ledger_runs=exc.ledger_runs,
+                    )
+                else:
+                    candidate = exc.operation
+                _validate_operation(candidate, safe_portfolio, current_step,
+                                    effective_as_of, require_report=False)
+                accepted_failure = True
+            except (TypeError, ValueError):
+                pass  # Invalid injected metadata is a failure, not confirmed ledger evidence.
+        if accepted_failure and isinstance(exc, PaperPartialOperationError):
+            partial_error = exc
+        if accepted_failure and isinstance(exc, PaperReportWriteError):
             report_error = exc
             steps.append({"name": current_step, "status": "succeeded"})
             current_step = "paper_report"
@@ -175,22 +225,43 @@ def run_paper_daily_automation(
     if completed_at < started_at:
         raise ValueError("completed_at 不能早于 started_at")
     status = "success" if error is None else "failed"
+    operation_status: str | None
     if operation is not None:
+        ledger_runs = operation.ledger_runs
         operation_status = operation.status
         processed_dates = [item.isoformat() for item in operation.processed_dates]
         ledger_committed: bool | None = operation.status in {"initialized", "processed"} and bool(
             operation.processed_dates
         )
     elif report_error is not None:
+        ledger_runs = report_error.ledger_runs
         operation_status = report_error.operation_status
         processed_dates = [item.isoformat() for item in report_error.processed_dates]
         ledger_committed = report_error.ledger_committed
+    elif partial_error is not None:
+        operation_status = "partial"
+        processed_dates = [item.isoformat() for item in partial_error.processed_dates]
+        ledger_committed = True
+        ledger_runs = partial_error.ledger_runs
     else:
+        ledger_runs = None
         operation_status = None
         processed_dates = []
         ledger_committed = None
     payload: dict[str, object] = {
         "schema_version": PAPER_AUTOMATION_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "run_identity": {
+            "market": market_identity,
+            "health": health_identity,
+            "ledger": {
+                "scope": (
+                    "unknown" if ledger_runs is None else "partial" if partial_error else "complete"
+                ),
+                "runs": [] if ledger_runs is None else references_json(ledger_runs),
+            },
+            "report": operation.report_identity if operation is not None else None,
+        },
         "workflow": "paper_daily",
         "status": status,
         "portfolio_id": safe_portfolio,
@@ -219,6 +290,7 @@ def run_paper_daily_automation(
         "broker_connected": False,
         "authorizes_real_money": False,
     }
+    validate_run_identity(payload)
     run_id = _run_id(payload)
     payload["run_id"] = run_id
     status_stage = "prepare_status_paths"
@@ -247,6 +319,8 @@ def run_paper_daily_automation(
             processed_dates=processed_dates,
             archive_confirmed=archive_confirmed,
             archive_path=archive_path,
+            attempt_id=attempt_id,
+            ledger_runs=ledger_runs,
         ) from exc
     return PaperAutomationResult(
         payload=payload,
@@ -293,6 +367,8 @@ def _validate_operation(
     portfolio_id: str,
     step: str,
     as_of_date: date,
+    *,
+    require_report: bool = True,
 ) -> None:
     if not isinstance(operation, PaperOperationResult):
         raise TypeError("模拟盘步骤返回了无效结果")
@@ -313,8 +389,13 @@ def _validate_operation(
         valid = step == "paper_init" and operation.status == "initialized" and len(dates) == 1
     if not valid:
         raise ValueError("模拟盘步骤返回了不一致的状态与处理日期")
-    if not isinstance(operation.report_path, Path):
+    if require_report and not isinstance(operation.report_path, Path):
         raise ValueError("模拟盘步骤未返回已生成报告的路径")
+    validate_report(operation.report_identity)
+    if operation.ledger_runs is not None:
+        refs = references_json(operation.ledger_runs)
+        if sorted({r["trade_date"] for r in refs}) != [d.isoformat() for d in dates]:
+            raise ValueError("模拟盘步骤收据与处理日期不一致")
 
 
 def _aware_utc(value: datetime, label: str) -> datetime:

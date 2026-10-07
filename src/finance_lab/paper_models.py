@@ -122,6 +122,23 @@ class PaperDataContext:
 
 
 @dataclass(frozen=True)
+class PaperRunReference:
+    run_id: str
+    batch_id: str
+    account_id: str
+    trade_date: date
+    dataset_id: str
+    curated_sha256: str
+    state_hash: str
+
+
+@dataclass(frozen=True)
+class PaperBatchCommit:
+    states: tuple[PaperState, ...]
+    run_refs: tuple[PaperRunReference, ...]
+
+
+@dataclass(frozen=True)
 class PaperOperationResult:
     status: PaperOperationStatus
     portfolio_id: str
@@ -129,6 +146,8 @@ class PaperOperationResult:
     states: tuple[PaperState, ...]
     data_context: PaperDataContext | None
     report_path: Path | None = None
+    ledger_runs: tuple[PaperRunReference, ...] | None = None
+    report_identity: dict[str, str] | None = None
 
 
 def validate_portfolio_id(value: str) -> str:
