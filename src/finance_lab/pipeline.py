@@ -38,6 +38,7 @@ from finance_lab.parameter_sensitivity import run_parameter_sensitivity
 from finance_lab.parameter_sensitivity_report import write_parameter_sensitivity_report
 from finance_lab.report import write_backtest_report
 from finance_lab.sample import make_synthetic_daily_prices
+from finance_lab.source_profiles import SourceProfile, load_source_profile
 from finance_lab.sources import DataSourceError, fetch_akshare, fetch_baostock
 from finance_lab.storage import (
     read_curated,
@@ -47,6 +48,7 @@ from finance_lab.storage import (
 )
 from finance_lab.strategy_comparison import run_strategy_comparison
 from finance_lab.strategy_comparison_report import write_strategy_comparison_report
+from finance_lab.tencent_source import fetch_tencent
 from finance_lab.validation import (
     assert_valid_daily_prices,
     compare_sources,
@@ -87,6 +89,8 @@ class UpdateRecord:
     curated_file: str | None = None
     source_errors: dict[str, str] = field(default_factory=dict)
     source_diagnostics: dict[str, dict[str, object]] = field(default_factory=dict)
+    source_request_windows: dict[str, dict[str, str]] = field(default_factory=dict)
+    source_transport: dict[str, dict[str, object]] = field(default_factory=dict)
     source_comparison: dict[str, object] | None = None
     status: str = "failed"
 
@@ -160,19 +164,39 @@ def _fetch_instrument(
     end: date,
     paths: ProjectPaths,
     batch: MarketUpdateBatch | None = None,
+    profile: SourceProfile | None = None,
 ) -> UpdateRecord:
+    profile = profile or load_source_profile(paths.root)
     record = UpdateRecord(symbol=instrument.symbol, name=instrument.name)
     frames: dict[str, pd.DataFrame] = {}
-    fetchers = {"akshare": fetch_akshare, "baostock": fetch_baostock}
+    registry = {"akshare": fetch_akshare, "baostock": fetch_baostock, "tencent": fetch_tencent}
+    fetchers = {source: registry[source] for source in profile.required_sources}
     for source, fetcher in fetchers.items():
+        source_start = profile.request_start(source, instrument, start, end)
+        record.source_request_windows[source] = {
+            "start_date": source_start.isoformat(), "end_date": end.isoformat(),
+            "role": "primary" if source == profile.primary_source else "reference",
+        }
         if batch is not None:
             batch.stage("fetch")
         frame: pd.DataFrame | None = None
         try:
-            frame = fetcher(instrument, start, end)
+            frame = fetcher(instrument, source_start, end)
             assert_valid_daily_prices(frame)
             assert_data_identity(frame, expected_symbol=instrument.symbol)
+            if not frame["source"].eq(source).all():
+                raise ValueError("响应来源与选择来源不一致")
             counts = _checked_source_counts(frame)
+            if source == "tencent" and "tencent_transport" in frame.attrs:
+                transport = frame.attrs["tencent_transport"]
+                keys = {
+                    "protocol", "requested_start", "requested_end", "provider_windows",
+                    "raw_received_rows", "unique_valid_rows", "exact_overlap_rows",
+                    "outside_requested_rows",
+                }
+                if not isinstance(transport, dict) or set(transport) != keys:
+                    raise ValueError("腾讯传输诊断字段无效")
+                record.source_transport[source] = json.loads(json.dumps(transport, allow_nan=False))
             dates = pd.to_datetime(frame["trade_date"])
             record.source_diagnostics[source] = {
                 **counts,
@@ -223,14 +247,20 @@ def _fetch_instrument(
                 "last_trade_date": None,
             }
 
-    if not frames:
+    profile.assert_unchanged()
+    if not frames or (profile.profile_id != "legacy" and profile.primary_source not in frames):
         return record
 
-    primary_source = "akshare" if "akshare" in frames else next(iter(frames))
+    primary_source = (
+        profile.primary_source if profile.primary_source in frames else next(iter(frames))
+    )
     primary = frames[primary_source]
     if batch is not None:
         batch.stage("curated")
-    curated_path = save_curated(primary, paths)
+    curated_path = (
+        save_curated(primary, paths, preferred_source="tencent")
+        if profile.profile_id == "tencent_baostock" else save_curated(primary, paths)
+    )
     record.primary_source = primary_source
     record.rows = int(len(primary))
     record.curated_file = str(curated_path.relative_to(paths.root))
@@ -251,11 +281,16 @@ def update_market_data(
     paths = get_paths(root)
     with market_data_lock(paths.data):
         assert_market_data_readable(paths)
+        profile = load_source_profile(root if root is not None else paths.root)
         instruments = load_instruments(paths.root)
+        for instrument in instruments:
+            for source in profile.required_sources:
+                profile.request_start(source, instrument, start, end)
         with market_update_batch(
             paths, start, end, tuple(instrument.symbol for instrument in instruments),
         ) as batch:
-            payload = _update_market_data(start, end, paths, instruments, batch)
+            payload = _update_market_data(start, end, paths, instruments, batch, profile)
+            profile.assert_unchanged()
         payload["market_identity"] = {
             "batch_id": batch.state.batch_id,
             "summary_sha256": batch.state.summary_sha256,
@@ -269,9 +304,11 @@ def _update_market_data(
     paths: ProjectPaths,
     instruments: list[Instrument],
     batch: MarketUpdateBatch,
+    profile: SourceProfile | None = None,
 ) -> dict[str, Any]:
+    profile = profile or load_source_profile(paths.root)
     records = [
-        _fetch_instrument(instrument, start, end, paths, batch)
+        _fetch_instrument(instrument, start, end, paths, batch, profile)
         for instrument in instruments
     ]
     successful = [record for record in records if record.rows > 0]
@@ -289,9 +326,11 @@ def _update_market_data(
         "status": outcome,
         "database_rows": database_rows,
         "records": [asdict(record) for record in records],
+        "source_profile": profile.metadata(),
     }
     output = paths.outputs / "update_summary.json"
     batch.stage("summary")
+    profile.assert_unchanged()
     write_text_atomic(
         output,
         json.dumps(payload, ensure_ascii=False, indent=2),

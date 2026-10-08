@@ -66,15 +66,23 @@ def _save_raw_snapshot(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
     return output
 
 
-def save_curated(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
+def save_curated(
+    frame: pd.DataFrame, paths: ProjectPaths, *, preferred_source: str | None = None,
+) -> Path:
     with market_data_lock(paths.data):
         assert_market_data_writable(paths)
-        return _save_curated(frame, paths)
+        return _save_curated(frame, paths, preferred_source=preferred_source)
 
 
-def _save_curated(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
+def _save_curated(
+    frame: pd.DataFrame, paths: ProjectPaths, *, preferred_source: str | None = None,
+) -> Path:
     assert_valid_daily_prices(frame)
     symbol = assert_data_identity(frame)
+    if preferred_source is not None and (
+        preferred_source != "tencent" or not frame["source"].eq(preferred_source).all()
+    ):
+        raise ValueError("显式优先来源必须为 tencent，且与输入行情来源一致")
     output = _contained_path(paths.curated, f"{_safe_symbol(symbol)}.parquet")
     if output.exists():
         previous = pd.read_parquet(output)
@@ -83,6 +91,8 @@ def _save_curated(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
         combined["trade_date"] = pd.to_datetime(combined["trade_date"])
         # A temporary fallback response must not overwrite an existing preferred-source row.
         source_priority = {"akshare": 20, "baostock": 10}
+        if preferred_source is not None:
+            source_priority[preferred_source] = 30
         combined["_source_priority"] = combined["source"].map(source_priority).fillna(0)
         combined = combined.sort_values(
             ["trade_date", "_source_priority", "ingested_at"]

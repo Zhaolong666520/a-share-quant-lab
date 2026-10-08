@@ -234,7 +234,9 @@ def test_fetch_verifies_requested_identity_before_saving_raw(
     paths = get_paths(tmp_path)
     wrong = make_synthetic_daily_prices(periods=120)
     wrong["symbol"] = "sh.510300"
+    wrong["source"] = "akshare"  # Mocked provider boundary, not a real market-data claim.
     fallback = wrong.copy()
+    fallback["source"] = "baostock"
     if fallback_valid:
         fallback["symbol"] = "sh.000300"
     monkeypatch.setattr(pipeline, "fetch_akshare", lambda *args: wrong)

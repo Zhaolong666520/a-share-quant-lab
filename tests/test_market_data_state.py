@@ -29,8 +29,8 @@ def test_public_payload_parser_without_paths() -> None:
 
 
 def _install_fetch(monkeypatch: pytest.MonkeyPatch, prices: pd.DataFrame) -> None:
-    monkeypatch.setattr(pipeline, "fetch_akshare", lambda *args: prices.copy())
-    monkeypatch.setattr(pipeline, "fetch_baostock", lambda *args: prices.copy())
+    monkeypatch.setattr(pipeline, "fetch_akshare", lambda *args: prices.assign(source="akshare"))
+    monkeypatch.setattr(pipeline, "fetch_baostock", lambda *args: prices.assign(source="baostock"))
 
 
 def _update(root: Path, prices: pd.DataFrame) -> dict[str, object]:
