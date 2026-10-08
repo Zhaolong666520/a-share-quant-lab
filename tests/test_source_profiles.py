@@ -448,6 +448,43 @@ def test_profile_rejects_native_windows_junction(tmp_path: Path, component: str)
         load_source_profile(root)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Windows junction behavior")
+@pytest.mark.parametrize("component", ["root", "ancestor"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_fetch_cli_rejects_environment_junction_before_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    component: str, configured: bool,
+) -> None:
+    import subprocess
+
+    from finance_lab.cli import main
+
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    target = actual if component == "root" else actual / "project"
+    target.mkdir(exist_ok=True)
+    profile = _configure(target)
+    if not configured:
+        profile.unlink()
+    link = tmp_path / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(actual)],
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 0, "junction fixture creation failed"
+    root = link if component == "root" else link / "project"
+    assert root.resolve() == target
+    calls = _providers(monkeypatch)
+    monkeypatch.setenv("FINANCE_LAB_ROOT", str(root))
+
+    assert main(["fetch", "--start", START.isoformat(), "--end", END.isoformat()]) == 1
+    assert calls == []
+    assert "source_profile" in capsys.readouterr().err
+    assert not (target / "outputs" / "update_summary.json").exists()
+    assert not (target / "data" / "market_update_state.json").exists()
+    assert not list((target / "data" / "raw").rglob("*.parquet"))
+
+
 def test_switch_back_to_legacy_uses_original_curated_priority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -37,20 +37,27 @@ class ProjectPaths:
             directory.mkdir(parents=True, exist_ok=True)
 
 
-def project_root() -> Path:
+def select_project_root(root: Path | None = None) -> Path:
+    """Select the effective input root without resolving away path links."""
+    if root is not None:
+        return root
     configured = os.environ.get("FINANCE_LAB_ROOT")
     if configured:
-        return Path(configured).expanduser().resolve()
+        return Path(configured).expanduser()
     source_root = Path(__file__).resolve().parents[2]
     if (source_root / "pyproject.toml").is_file() and (
         source_root / "src" / "finance_lab" / "config.py"
     ).is_file():
         return source_root
-    return Path.cwd().resolve()
+    return Path.cwd()
+
+
+def project_root() -> Path:
+    return select_project_root().resolve()
 
 
 def get_paths(root: Path | None = None) -> ProjectPaths:
-    resolved = (root or project_root()).resolve()
+    resolved = select_project_root(root).resolve()
     paths = ProjectPaths(
         root=resolved,
         data=resolved / "data",

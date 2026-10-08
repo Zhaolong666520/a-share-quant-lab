@@ -13,7 +13,13 @@ import pandas as pd
 
 from finance_lab.atomic_io import published_parquet_files, write_text_atomic
 from finance_lab.backtest import run_backtest
-from finance_lab.config import Instrument, ProjectPaths, get_paths, load_instruments
+from finance_lab.config import (
+    Instrument,
+    ProjectPaths,
+    get_paths,
+    load_instruments,
+    select_project_root,
+)
 from finance_lab.cost_sensitivity import run_cost_sensitivity
 from finance_lab.cost_sensitivity_report import write_cost_sensitivity_report
 from finance_lab.data_identity import assert_data_identity, validate_data_identity
@@ -278,10 +284,11 @@ def update_market_data(
 ) -> dict[str, Any]:
     if start >= end:
         raise ValueError("开始日期必须早于结束日期")
-    paths = get_paths(root)
+    input_root = select_project_root(root)
+    paths = get_paths(input_root)
     with market_data_lock(paths.data):
         assert_market_data_readable(paths)
-        profile = load_source_profile(root if root is not None else paths.root)
+        profile = load_source_profile(input_root)
         instruments = load_instruments(paths.root)
         for instrument in instruments:
             for source in profile.required_sources:
