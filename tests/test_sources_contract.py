@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from requests.exceptions import ProxyError
 
 from finance_lab import pipeline
 from finance_lab.cli import main
@@ -39,9 +40,58 @@ def _ak_rows() -> pd.DataFrame:
     )
 
 
+def _ak_index_rows() -> pd.DataFrame:
+    return _ak_rows().rename(
+        columns={
+            "日期": "date", "开盘": "open", "最高": "high", "最低": "low",
+            "收盘": "close", "成交量": "volume", "成交额": "amount",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "instrument", [INDEX, Instrument("399001", "sz", "index", "index")]
+)
+def test_akshare_index_uses_explicit_market_prefix_without_global_mapping(
+    monkeypatch: pytest.MonkeyPatch, instrument: Instrument
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def daily(**kwargs: Any) -> pd.DataFrame:
+        calls.append(kwargs)
+        return _ak_index_rows()
+
+    def mapping(**kwargs: Any) -> pd.DataFrame:
+        raise ProxyError("global index mapping unavailable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(stock_zh_index_daily_em=daily, index_zh_a_hist=mapping),
+    )
+    frame = fetch_akshare(instrument, START, END)
+    assert calls == [{
+        "symbol": instrument.exchange + instrument.code,
+        "start_date": "20240101", "end_date": "20240110",
+    }]
+    assert frame["symbol"].tolist() == [instrument.symbol] * 2
+    assert frame["trade_date"].tolist() == list(pd.to_datetime(["2024-01-02", "2024-01-03"]))
+    assert frame[["open", "high", "low", "close", "volume", "amount"]].to_dict("list") == {
+        "open": [10, 11], "high": [11, 12], "low": [9, 10], "close": [10.5, 11.5],
+        "volume": [100, 110], "amount": [1000, 1100],
+    }
+    assert frame["source"].tolist() == ["akshare"] * 2
+    assert frame["volume_unit"].tolist() == ["lot"] * 2
+    assert frame["adjustment"].tolist() == ["none"] * 2
+    assert frame["ingested_at"].notna().all()
+    assert frame.attrs["source_diagnostics"] == {
+        "received_rows": 2, "accepted_rows": 2, "rejected_rows": 0, "rejection_reasons": {},
+    }
+
+
 def _install_ak(monkeypatch: pytest.MonkeyPatch, rows: pd.DataFrame) -> None:
     module = SimpleNamespace(
-        index_zh_a_hist=lambda **kwargs: rows.copy(),
+        stock_zh_index_daily_em=lambda **kwargs: rows.copy(),
         fund_etf_hist_em=lambda **kwargs: rows.copy(),
     )
     monkeypatch.setitem(sys.modules, "akshare", module)
@@ -51,7 +101,7 @@ def _install_ak(monkeypatch: pytest.MonkeyPatch, rows: pd.DataFrame) -> None:
 def test_akshare_accepts_all_valid_rows_with_counts(
     monkeypatch: pytest.MonkeyPatch, instrument: Instrument
 ) -> None:
-    _install_ak(monkeypatch, _ak_rows())
+    _install_ak(monkeypatch, _ak_index_rows() if instrument.kind == "index" else _ak_rows())
     frame = fetch_akshare(instrument, START, END)
     assert len(frame) == 2
     assert frame.attrs["source_diagnostics"] == {
@@ -62,6 +112,35 @@ def test_akshare_accepts_all_valid_rows_with_counts(
     }
 
 
+def test_akshare_etf_keeps_chinese_api_and_unadjusted_daily_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def etf(**kwargs: Any) -> pd.DataFrame:
+        calls.append(kwargs)
+        return _ak_rows()
+
+    def forbidden_index(**kwargs: Any) -> pd.DataFrame:
+        raise AssertionError("ETF must not use the index endpoint")
+
+    monkeypatch.setitem(
+        sys.modules, "akshare",
+        SimpleNamespace(fund_etf_hist_em=etf, stock_zh_index_daily_em=forbidden_index),
+    )
+    frame = fetch_akshare(ETF, START, END)
+    assert calls == [{
+        "symbol": "510300", "period": "daily", "start_date": "20240101",
+        "end_date": "20240110", "adjust": "",
+    }]
+    assert frame["symbol"].tolist() == [ETF.symbol] * 2
+    assert frame["close"].tolist() == [10.5, 11.5]
+    assert frame["source"].tolist() == ["akshare"] * 2
+    assert frame["volume_unit"].tolist() == ["lot"] * 2
+    assert frame["adjustment"].tolist() == ["none"] * 2
+
+
+@pytest.mark.parametrize("instrument", [INDEX, ETF])
 @pytest.mark.parametrize(
     "change",
     [
@@ -70,46 +149,59 @@ def test_akshare_accepts_all_valid_rows_with_counts(
     ],
 )
 def test_akshare_bad_response_is_not_silently_published(
-    monkeypatch: pytest.MonkeyPatch, change: str
+    monkeypatch: pytest.MonkeyPatch, change: str, instrument: Instrument
 ) -> None:
-    rows = _ak_rows()
+    is_index = instrument.kind == "index"
+    rows = _ak_index_rows() if is_index else _ak_rows()
+    date_column, close_column, volume_column = (
+        ("date", "close", "volume") if is_index else ("日期", "收盘", "成交量")
+    )
     if change == "empty":
         rows = rows.iloc[0:0]
     elif change == "missing":
-        rows = rows.drop(columns=["收盘"])
+        rows = rows.drop(columns=[close_column])
     elif change == "bad_date":
-        rows.loc[1, "日期"] = "not-a-date"
+        rows.loc[1, date_column] = "not-a-date"
     elif change == "bad_price":
-        rows.loc[1, "收盘"] = "not-a-price"
+        rows.loc[1, close_column] = "not-a-price"
     elif change == "bad_volume":
-        rows.loc[1, "成交量"] = "not-a-volume"
+        rows.loc[1, volume_column] = "not-a-volume"
     elif change == "infinite_price":
-        rows.loc[1, "收盘"] = "inf"
+        rows.loc[1, close_column] = "inf"
     elif change == "duplicate":
-        rows.loc[1, "日期"] = rows.loc[0, "日期"]
+        rows.loc[1, date_column] = rows.loc[0, date_column]
     elif change == "same_day_different_time":
-        rows.loc[0, "日期"] = "2024-01-02 09:30"
-        rows.loc[1, "日期"] = "2024-01-02 15:00"
+        rows.loc[0, date_column] = "2024-01-02 09:30"
+        rows.loc[1, date_column] = "2024-01-02 15:00"
     else:
-        rows.loc[1, "日期"] = "2024-02-01"
+        rows.loc[1, date_column] = "2024-02-01"
     _install_ak(monkeypatch, rows)
     with pytest.raises(DataSourceError) as raised:
-        fetch_akshare(INDEX, START, END)
-    assert raised.value.stage in {"response", "validation"}
+        fetch_akshare(instrument, START, END)
+    assert raised.value.stage == ("response" if change in {"empty", "missing"} else "validation")
     assert raised.value.received_rows == len(rows)
+    assert raised.value.accepted_rows == 0
+    assert raised.value.rejected_rows == len(rows)
+    if change == "outside":
+        assert "请求范围外日期" in str(raised.value)
 
 
+@pytest.mark.parametrize("instrument", [INDEX, ETF])
 def test_akshare_exception_does_not_expose_url(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, instrument: Instrument,
 ) -> None:
     def fail(**kwargs: Any) -> pd.DataFrame:
         raise TimeoutError("https://example.invalid/private?token=secret")
 
-    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(index_zh_a_hist=fail))
+    monkeypatch.setitem(
+        sys.modules, "akshare",
+        SimpleNamespace(stock_zh_index_daily_em=fail, fund_etf_hist_em=fail),
+    )
     with pytest.raises(DataSourceError) as raised:
-        fetch_akshare(INDEX, START, END)
+        fetch_akshare(instrument, START, END)
     assert raised.value.stage == "request"
     assert "secret" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, TimeoutError)
 
 
 class _BaoResult:
@@ -290,13 +382,37 @@ def test_baostock_call_exceptions_keep_stage_and_cleanup(
     assert calls.count("logout") == (0 if stage == "login" else 1)
 
 
+def test_pipeline_accepts_explicit_prefix_index_with_complete_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_ak(monkeypatch, _ak_index_rows())
+    _install_bao(monkeypatch, _BaoResult(_bao_rows()))
+    paths = get_paths(tmp_path)
+    record = pipeline._fetch_instrument(INDEX, START, END, paths)
+    assert record.status == "success"
+    assert record.primary_source == "akshare"
+    assert record.source_errors == {}
+    assert record.rows == 2
+    assert len(record.raw_files) == 2
+    assert record.source_diagnostics["akshare"] == {
+        "received_rows": 2, "accepted_rows": 2, "rejected_rows": 0,
+        "rejection_reasons": {}, "status": "success", "stage": "complete",
+        "first_trade_date": "2024-01-02", "last_trade_date": "2024-01-03",
+    }
+    saved = pd.read_parquet(paths.root / record.curated_file)
+    assert saved["symbol"].tolist() == [INDEX.symbol] * 2
+    assert saved["source"].tolist() == ["akshare"] * 2
+    assert saved["volume_unit"].tolist() == ["lot"] * 2
+    assert saved["adjustment"].tolist() == ["none"] * 2
+
+
 def test_pipeline_records_failed_primary_and_successful_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail(**kwargs: Any) -> pd.DataFrame:
         raise TimeoutError("private URL token=secret")
 
-    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(index_zh_a_hist=fail))
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(stock_zh_index_daily_em=fail))
     _install_bao(monkeypatch, _BaoResult(_bao_rows()))
     record = pipeline._fetch_instrument(INDEX, START, END, get_paths(tmp_path))
     assert record.status == "partial_sources"
@@ -321,7 +437,7 @@ def test_partial_source_update_has_nonzero_cli_status(
     def fail(**kwargs: Any) -> pd.DataFrame:
         raise TimeoutError("private token")
 
-    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(index_zh_a_hist=fail))
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(stock_zh_index_daily_em=fail))
     _install_bao(monkeypatch, _BaoResult(_bao_rows()))
     monkeypatch.setenv("FINANCE_LAB_ROOT", str(tmp_path))
     assert main(["fetch", "--start", START.isoformat(), "--end", END.isoformat()]) == 3
@@ -355,7 +471,7 @@ def test_pipeline_both_fail_preserves_old_curated_but_reports_failure(
     def fail(**kwargs: Any) -> pd.DataFrame:
         raise TimeoutError("upstream timeout")
 
-    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(index_zh_a_hist=fail))
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(stock_zh_index_daily_em=fail))
     _install_bao(monkeypatch, _BaoResult([]), login_code="1")
     result = pipeline.update_market_data(START, END, tmp_path)
     record = result["records"][0]

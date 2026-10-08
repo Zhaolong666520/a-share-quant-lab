@@ -134,9 +134,8 @@ def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFram
         import akshare as ak
 
         if instrument.kind == "index":
-            raw = ak.index_zh_a_hist(
-                symbol=instrument.code,
-                period="daily",
+            raw = ak.stock_zh_index_daily_em(
+                symbol=instrument.exchange + instrument.code,
                 start_date=_date_compact(start),
                 end_date=_date_compact(end),
             )
@@ -159,7 +158,8 @@ def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFram
         raise DataSourceError("AKShare 响应不是表格", stage="response", received_rows=0)
     return _normalize(
         raw, instrument, start, end, source="akshare", volume_unit="lot",
-        date_field="日期", fields={
+        date_field="date" if instrument.kind == "index" else "日期",
+        fields={name: name for name in _NUMERIC} if instrument.kind == "index" else {
             "开盘": "open", "最高": "high", "最低": "low", "收盘": "close",
             "成交量": "volume", "成交额": "amount",
         },

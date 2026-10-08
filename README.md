@@ -20,7 +20,7 @@
 
 账本已补完整结构契约、非空旧版本迁移和异常回滚验收；Windows、Ubuntu、macOS 存储验收均已实跑通过，详见[账本结构与跨平台验收](docs/账本结构与跨平台验收.md)。
 
-按[运行恢复与每日可靠性计划](docs/superpowers/plans/2026-10-04-operational-recovery.md)，已完成材料保存、人工确认后的独立离线恢复验收及 U4 只读状态读取器的[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。新增[运行身份关联](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)和[区间验收工具](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)，核对完整新归档、实际提交和重复无新增；正式恢复运行仍待后续，实际项目及计划任务未切换。
+按[运行恢复与每日可靠性计划](docs/superpowers/plans/2026-10-04-operational-recovery.md)，已完成材料保存、人工确认后的独立离线恢复验收及 U4 只读状态读取器的[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。新增[运行身份关联](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)和[区间验收工具](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)，核对完整新归档、实际提交和重复无新增。[10月8日受控处理](docs/superpowers/plans/2026-10-08-runtime-recovery-report.md)新增脚本显式数据根及同源指数接口修复，但真实来源请求仍失败；未接入新根，原任务已恢复原配置和启用状态，正式恢复运行仍待后续。
 
 ![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 

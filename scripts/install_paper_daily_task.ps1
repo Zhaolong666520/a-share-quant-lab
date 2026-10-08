@@ -8,11 +8,40 @@ param(
     [int]$StaleAfterBusinessDays = 3,
     [ValidatePattern("^[a-z0-9]+(?:-[a-z0-9]+)*$")]
     [string]$Portfolio = "default",
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [string]$DataRoot
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+
+function Get-ValidatedDataRoot {
+    param([string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Root) -or
+        $Root -match '[\x00-\x1f"''`<>|?*]' -or
+        $Root -match '(^|[\\/])\.\.([\\/]|$)') {
+        throw "Invalid DataRoot: use an existing ordinary filesystem directory."
+    }
+    $provider = $null
+    $drive = $null
+    $absolute = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Root, [ref]$provider, [ref]$drive
+    )
+    if ($provider.Name -ne "FileSystem") {
+        throw "DataRoot must use the filesystem provider."
+    }
+    $item = Get-Item -LiteralPath $absolute -Force -ErrorAction Stop
+    if ($item -isnot [System.IO.DirectoryInfo]) {
+        throw "DataRoot must be an existing directory."
+    }
+    while ($null -ne $item) {
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "DataRoot and its ancestors must not be links or reparse points."
+        }
+        $item = $item.Parent
+    }
+    return $absolute
+}
 
 if ($Uninstall) {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -43,6 +72,12 @@ $argument = (
     "-File `"$Runner`" -StartDate $StartDate " +
     "-StaleAfterBusinessDays $StaleAfterBusinessDays -Portfolio $Portfolio"
 )
+if ($PSBoundParameters.ContainsKey("DataRoot")) {
+    $ResolvedDataRoot = Get-ValidatedDataRoot $DataRoot
+    # Native parsing requires doubled trailing backslashes before a closing quote.
+    $NativeDataRoot = $ResolvedDataRoot -replace '(\\+)$', '$1$1'
+    $argument += " -DataRoot `"$NativeDataRoot`""
+}
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument $argument `
