@@ -74,6 +74,11 @@ def _http(
 
     monkeypatch.setattr(requests.Session, "send", send)
     monkeypatch.setattr(requests.Session, "close", close)
+    from finance_lab import _tencent_transport, tencent_source
+
+    # Replace only process supervision for detailed in-process HTTP semantics;
+    # real deadline/worker tests separately exercise the actual supervised path.
+    monkeypatch.setattr(tencent_source, "_request_body", _tencent_transport._read_body)
     return responses, calls, closed_sessions
 
 
@@ -150,8 +155,8 @@ def test_multiyear_overlap_numeric_formatting_and_window_statistics(
             "param": [f"sh510300,day,{year}-01-01,{year + 1}-12-31,640,"],
             "r": ["0.8205512681390605"],
         }
-    assert len({id(c["session"]) for c in calls}) == 1
-    assert closed == [calls[0]["session"]] and all(r.closed for r in responses)
+    assert len({id(c["session"]) for c in calls}) == 2
+    assert closed == [call["session"] for call in calls] and all(r.closed for r in responses)
 
 
 @pytest.mark.parametrize("wrapper", ["json", "jsonp", "jsonp_semicolon"])
@@ -340,18 +345,6 @@ def test_decoded_response_byte_limit_closes_resources(monkeypatch: pytest.Monkey
     assert responses[0].closed and len(calls) == len(closed) == 1
 
 
-def test_stream_total_deadline_closes_resources(monkeypatch: pytest.MonkeyPatch) -> None:
-    from finance_lab import tencent_source
-
-    responses, calls, closed = _http(monkeypatch, [_payload()])
-    ticks = iter([0.0, 0.0, 46.0])
-    monkeypatch.setattr(tencent_source, "monotonic", lambda: next(ticks), raising=False)
-    with pytest.raises(DataSourceError) as raised:
-        _fetch()
-    assert raised.value.stage == "request" and raised.value.received_rows == 0
-    assert responses[0].closed and len(calls) == len(closed) == 1
-
-
 @pytest.mark.parametrize("instrument,start,end", [
     (Instrument("399001", "sz", "index", "index"), START, END),
     (Instrument("510300", "sh", "stock", "stock"), START, END),
@@ -421,7 +414,7 @@ def test_later_request_failure_counts_only_received_rows(monkeypatch: pytest.Mon
     error = raised.value
     assert error.stage == "request"
     assert (error.received_rows, error.accepted_rows, error.rejected_rows) == (1, 0, 1)
-    assert len(calls) == 2 and len(closed) == 1 and all(r.closed for r in responses)
+    assert len(calls) == len(closed) == 2 and all(r.closed for r in responses)
 
 
 def test_at_most_25_calendar_years_are_allowed(monkeypatch: pytest.MonkeyPatch) -> None:

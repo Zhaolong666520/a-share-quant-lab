@@ -4,18 +4,15 @@ import json
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
-from time import monotonic
 from typing import Any
 
 import pandas as pd
-import requests
 
+from finance_lab._tencent_transport import request_body
 from finance_lab.config import Instrument
 from finance_lab.sources import CANONICAL_COLUMNS, DataSourceError, _normalize
 
-_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _NUMERIC = ("open", "close", "high", "low", "volume", "amount")
-_MAX_BYTES = 1024 * 1024
 _MAX_ELAPSED = 45
 _CHINA = timezone(timedelta(hours=8))
 _Bar = tuple[date, float, float, float, float, float, float]
@@ -28,26 +25,9 @@ def _failure(stage: str, received: int = 0) -> DataSourceError:
     )
 
 
-def _request_body(session: requests.Session, params: dict[str, str]) -> bytes:
-    """Bound decoded streaming bytes and elapsed time without changing routing."""
-    started = monotonic()
-    with session.get(_URL, params=params, timeout=(5, 15),
-                     allow_redirects=False, stream=True) as response:
-        if response.status_code != 200:
-            response.raise_for_status()
-            raise requests.HTTPError("Unexpected HTTP status")
-        if monotonic() - started > _MAX_ELAPSED:
-            raise requests.Timeout("Tencent response deadline exceeded")
-        body = bytearray()
-        for chunk in response.iter_content(chunk_size=65536):
-            if monotonic() - started > _MAX_ELAPSED:
-                raise requests.Timeout("Tencent response deadline exceeded")
-            if len(body) + len(chunk) > _MAX_BYTES:
-                raise requests.RequestException("Tencent response exceeds byte limit")
-            body.extend(chunk)
-        if monotonic() - started > _MAX_ELAPSED:
-            raise requests.Timeout("Tencent response deadline exceeded")
-        return bytes(body)
+def _request_body(params: dict[str, str]) -> bytes:
+    """Supervise the entire blocking request and reap its owned worker."""
+    return request_body(params, _MAX_ELAPSED)
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -141,33 +121,32 @@ def fetch_tencent(instrument: Instrument, start: date, end: date) -> pd.DataFram
     windows: list[dict[str, str]] = []
     today = datetime.now(_CHINA).date()
     try:
-        with requests.Session() as session:
-            for year in range(start.year, end.year + 1):
-                lower, upper = f"{year:04d}-01-01", f"{year + 1:04d}-12-31"
-                windows.append({"start": lower, "end": upper})
-                variable = f"kline_day{year}"
-                params = {"_var": variable, "param": f"{symbol},day,{lower},{upper},640,",
-                          "r": "0.8205512681390605"}
-                body = _request_body(session, params)
-                try:
-                    rows = _day_rows(body, variable, symbol)
-                except (ValueError, TypeError, RecursionError) as exc:
-                    raise _failure("response", received) from exc
-                received += len(rows)
-                limit = min(date(year + 1, 12, 31), today)
-                response_dates: set[date] = set()
-                for row in rows:
-                    bar = _bar(row, instrument, limit, received)
-                    day = bar[0]
-                    if day in response_dates:
+        for year in range(start.year, end.year + 1):
+            lower, upper = f"{year:04d}-01-01", f"{year + 1:04d}-12-31"
+            windows.append({"start": lower, "end": upper})
+            variable = f"kline_day{year}"
+            params = {"_var": variable, "param": f"{symbol},day,{lower},{upper},640,",
+                      "r": "0.8205512681390605"}
+            body = _request_body(params)
+            try:
+                rows = _day_rows(body, variable, symbol)
+            except (ValueError, TypeError, RecursionError) as exc:
+                raise _failure("response", received) from exc
+            received += len(rows)
+            limit = min(date(year + 1, 12, 31), today)
+            response_dates: set[date] = set()
+            for row in rows:
+                bar = _bar(row, instrument, limit, received)
+                day = bar[0]
+                if day in response_dates:
+                    raise _failure("validation", received)
+                response_dates.add(day)
+                if day in bars:
+                    if bar != bars[day]:
                         raise _failure("validation", received)
-                    response_dates.add(day)
-                    if day in bars:
-                        if bar != bars[day]:
-                            raise _failure("validation", received)
-                        overlaps += 1
-                    else:
-                        bars[day] = bar
+                    overlaps += 1
+                else:
+                    bars[day] = bar
     except DataSourceError:
         raise
     except Exception as exc:
