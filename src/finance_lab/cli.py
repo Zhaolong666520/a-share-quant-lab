@@ -12,7 +12,13 @@ from pathlib import Path
 import duckdb
 
 from finance_lab.atomic_io import published_parquet_files
-from finance_lab.config import get_paths, initialize_instruments, load_instruments, project_root
+from finance_lab.config import (
+    get_paths,
+    initialize_instruments,
+    load_instruments,
+    project_root,
+    select_project_root,
+)
 from finance_lab.data_identity import canonical_symbol_stem
 from finance_lab.data_manifest import DatasetManifest, generate_dataset_manifest
 from finance_lab.filename_audit import audit_curated_filenames
@@ -660,7 +666,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.command == "research-session-create":
                 result = create_session(
-                    project_root(), args.destination, expected_dataset_id=args.expected_dataset_id
+                    select_project_root(),
+                    args.destination,
+                    expected_dataset_id=args.expected_dataset_id,
                 )
             elif args.command == "research-session-verify":
                 result = verify_session(args.session)

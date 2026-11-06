@@ -58,6 +58,8 @@ def create_session(
     paths = _paths(source)
     if not paths.data.is_dir() or os.path.lexists(paths.data / "research_session.json"):
         raise SessionError("来源不是可冻结的正式项目")
+    for name in ("paper_trading.lock", "market_data.lock"):
+        _safe_path(paths.data / name)
     with paper_run_lock(paths.data / "paper_trading.lock"), market_data_lock(paths.data):
         _no_wal(source)
         assert_market_data_readable(paths)
@@ -130,6 +132,7 @@ def verify_session(session: Path) -> dict[str, Any]:
     snapshot = root / "snapshot"
     if not _safe_path(snapshot / "data").is_dir():
         raise SessionError("研究会话数据目录不存在")
+    _safe_path(snapshot / "data/market_data.lock")
     with market_data_lock(_paths(snapshot).data):
         _no_wal(snapshot)
         marker = json.loads(

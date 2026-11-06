@@ -179,6 +179,8 @@ def verify_activation(root: Path) -> dict[str, Any]:
     paths = _paths(root)
     if not paths.data.is_dir() or not _safe_path(root / "recovery_acceptance.json").is_file():
         raise ActivationError("恢复目录或验收凭据不存在")
+    for name in ("paper_trading.lock", "market_data.lock"):
+        _safe_path(paths.data / name)
     with paper_run_lock(paths.data / "paper_trading.lock"), market_data_lock(paths.data):
         return _verify_activation_locked(root)
 
