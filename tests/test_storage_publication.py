@@ -9,6 +9,7 @@ import pytest
 
 from finance_lab import atomic_io
 from finance_lab.config import get_paths
+from finance_lab.curated_io import CuratedReadError
 from finance_lab.data_manifest import generate_dataset_manifest
 from finance_lab.pipeline import validate_curated_data
 from finance_lab.sample import make_synthetic_daily_prices
@@ -92,9 +93,11 @@ def test_corrupted_published_file_is_not_silently_skipped(tmp_path: Path, reader
             issue["code"] for item in report["files"] for issue in item["issues"]
         }
     else:
-        error_type = duckdb.InvalidInputException if reader == "database" else pa.ArrowInvalid
-        with pytest.raises(error_type):
+        error_type = duckdb.InvalidInputException if reader == "database" else CuratedReadError
+        with pytest.raises(error_type) as raised:
             _read_rows(tmp_path, reader)
+        if reader == "manifest":
+            assert isinstance(raised.value.__cause__, pa.ArrowInvalid)
 
 
 @pytest.mark.parametrize("writer_name", ["write_parquet_atomic", "write_parquet_immutable"])

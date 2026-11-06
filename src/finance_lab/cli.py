@@ -19,6 +19,7 @@ from finance_lab.config import (
     project_root,
     select_project_root,
 )
+from finance_lab.curated_io import CuratedReadError
 from finance_lab.data_identity import canonical_symbol_stem
 from finance_lab.data_manifest import DatasetManifest, generate_dataset_manifest
 from finance_lab.filename_audit import audit_curated_filenames
@@ -1351,6 +1352,16 @@ def _run_command(args: argparse.Namespace) -> int:
         print(f"错误：{exc}", file=sys.stderr)
         return PaperPortfolioNotFound.exit_code
     except Exception as exc:
+        if isinstance(exc, CuratedReadError) and args.command in {
+            "account", "backtest", "experiment", "walk-forward", "cost-stress",
+            "parameter-test", "execution-test", "compare",
+        }:
+            return _missing_input(
+                "unreadable_curated_data",
+                "load_curated",
+                "无法读取已发布整理行情，本次未生成研究报告；已有报告不能代表本次成功。",
+                "保留当前文件，检查读取权限并用 validate 核验整理行情；确认原因后再处理。",
+            )
         if args.command in {
             "account-all",
             "experiment-all",

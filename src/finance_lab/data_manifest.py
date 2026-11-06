@@ -12,6 +12,7 @@ import pandas as pd
 
 from finance_lab.atomic_io import published_parquet_files, write_text_atomic
 from finance_lab.config import ProjectPaths
+from finance_lab.curated_io import read_curated_parquet
 from finance_lab.data_identity import validate_data_identity
 from finance_lab.market_data_lock import market_data_lock
 from finance_lab.market_data_state import assert_market_data_readable
@@ -276,7 +277,7 @@ def _generate_dataset_manifest(
     used_calendar_fallback = False
     for path in parquet_files:
         hash_before = file_sha256(path)
-        frame = pd.read_parquet(path)
+        frame = read_curated_parquet(path)
         hash_after = file_sha256(path)
         if hash_before != hash_after:
             raise RuntimeError(f"{path.name} 在生成清单期间发生变化，请重试")

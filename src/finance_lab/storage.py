@@ -14,6 +14,7 @@ from finance_lab.atomic_io import (
     write_parquet_immutable,
 )
 from finance_lab.config import ProjectPaths
+from finance_lab.curated_io import read_curated_parquet
 from finance_lab.data_identity import assert_data_identity, canonical_symbol_stem
 from finance_lab.market_data_lock import market_data_lock
 from finance_lab.market_data_state import assert_market_data_readable, assert_market_data_writable
@@ -189,7 +190,7 @@ def _read_curated(symbol: str, paths: ProjectPaths) -> pd.DataFrame:
     path = _contained_path(paths.curated, f"{_safe_symbol(symbol)}.parquet")
     if not path.exists():
         raise FileNotFoundError(f"尚未找到 {symbol} 的整理数据，请先运行数据更新")
-    frame = pd.read_parquet(path)
+    frame = read_curated_parquet(path)
     assert_data_identity(frame, filename=path.name, expected_symbol=symbol)
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     return frame.sort_values("trade_date").reset_index(drop=True)
