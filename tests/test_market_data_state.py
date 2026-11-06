@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -365,41 +366,198 @@ def test_process_death_after_publication_is_still_blocked(tmp_path: Path, phase:
     from finance_lab.market_data_state import MarketDataStateError, market_update_status
 
     paths, _ = make_paper_test_project(tmp_path)
-    code = f"""
+    diagnostics_base = Path(
+        os.environ.get("FINANCE_LAB_PROCESS_DIAGNOSTICS", str(tmp_path / "process-diagnostics"))
+    )
+    diagnostics_base.mkdir(parents=True, exist_ok=True)
+    diagnostics = Path(tempfile.mkdtemp(prefix=f"{phase}-", dir=diagnostics_base))
+    code = """
+import faulthandler
+import hashlib
+import importlib.metadata
+import json
 import os
+import platform
+import sys
+import time
 from datetime import date
+from pathlib import Path
+
+diagnostics = Path(sys.argv[1])
+phase = sys.argv[2]
+trace = (diagnostics / 'trace.jsonl').open('x', encoding='utf-8')
+fault = (diagnostics / 'fault.txt').open('x', encoding='utf-8')
+faulthandler.enable(file=fault, all_threads=True)
+
+def mark(event, **details):
+    trace.write(json.dumps({
+        'event': event, 'phase': phase, 'pid': os.getpid(),
+        'monotonic_ns': time.monotonic_ns(), **details,
+    }) + '\\n')
+    trace.flush()
+    os.fsync(trace.fileno())
+
+mark('child_bootstrap')
 from finance_lab import pipeline
 from finance_lab.config import get_paths
 from finance_lab.sample import make_synthetic_daily_prices
+mark('imports_completed')
+
+native_names = {
+    '_duckdb', 'duckdb.duckdb', 'pyarrow.lib',
+    'numpy._core._multiarray_umath', 'numpy.core._multiarray_umath',
+    'pandas._libs.interval', 'pandas._libs.tslibs.np_datetime',
+}
+native = {}
+for name, module in sorted(tuple(sys.modules.items())):
+    filename = getattr(module, '__file__', None)
+    if name not in native_names or not filename:
+        continue
+    path = Path(filename)
+    if path.suffix.lower() not in {'.pyd', '.so'}:
+        continue
+    native[name] = {
+        'path': str(path.resolve()), 'size': path.stat().st_size,
+        'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+dependencies = {}
+for name in ('duckdb', 'numpy', 'pandas', 'pyarrow', 'pytest', 'pytest-cov', 'coverage'):
+    try:
+        dependencies[name] = importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        dependencies[name] = None
+environment = {
+    'schema_version': 1, 'data_kind': 'synthetic',
+    'python': sys.version, 'executable': sys.executable,
+    'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
+    'platform': platform.platform(), 'machine': platform.machine(),
+    'trace_present': sys.gettrace() is not None,
+    'profile_present': sys.getprofile() is not None,
+    'dependencies': dependencies, 'loaded_native_extensions': native,
+    'native_extension_names_considered': sorted(native_names),
+    'commit': os.environ.get('GITHUB_SHA'),
+}
+with (diagnostics / 'environment.json').open('x', encoding='utf-8') as stream:
+    json.dump(environment, stream, indent=2)
+    stream.flush()
+    os.fsync(stream.fileno())
+mark('environment_recorded')
+
 prices = make_synthetic_daily_prices(periods=145)
 prices['symbol'] = 'sh.510300'
 prices['source'] = 'akshare'
 prices['volume_unit'] = 'share'
 pipeline.fetch_akshare = lambda *args: prices.copy()
 pipeline.fetch_baostock = lambda *args: prices.copy()
-name = {{'curated': 'save_curated', 'database': 'sync_duckdb',
-        'summary': 'write_text_atomic'}}[{phase!r}]
+
+original_sync = pipeline.sync_duckdb
+def observed_sync(*args, **kwargs):
+    mark('sync_duckdb_enter')
+    result = original_sync(*args, **kwargs)
+    mark('sync_duckdb_return')
+    return result
+pipeline.sync_duckdb = observed_sync
+
+name = {'curated': 'save_curated', 'database': 'sync_duckdb',
+        'summary': 'write_text_atomic'}[phase]
 original = getattr(pipeline, name)
 def interrupted(*args, **kwargs):
+    mark(phase + '_hook_enter')
     original(*args, **kwargs)
+    mark(phase + '_original_return')
+    mark('exit_requested', requested_exit_code=7)
     os._exit(7)
 setattr(pipeline, name, interrupted)
+mark('update_enter')
 pipeline.update_market_data(date(2022, 1, 1), prices['trade_date'].max().date())
+mark('update_return')
 """
-    result = subprocess.run(
-        [sys.executable, "-X", "utf8", "-c", code],
+    (diagnostics / "child.py").write_text(code, encoding="utf-8", newline="\n")
+    process = subprocess.Popen(
+        [sys.executable, "-X", "utf8", "-c", code, str(diagnostics), phase],
         env={
             **os.environ,
             "FINANCE_LAB_ROOT": str(tmp_path),
             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
         },
-        capture_output=True,
-        encoding="utf-8",
-        timeout=20,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    assert result.returncode == 7, result.stderr
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        stdout, stderr = process.communicate()
+    (diagnostics / "stdout.txt").write_bytes(stdout)
+    (diagnostics / "stderr.txt").write_bytes(stderr)
+    trace_path = diagnostics / "trace.jsonl"
+    markers = []
+    trace_errors = []
+    if trace_path.is_file():
+        for line in trace_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                markers.append(json.loads(line))
+            except json.JSONDecodeError:
+                trace_errors.append(line)
+    state_files = {}
+    for path in (
+        paths.data / "market_update_state.json",
+        paths.outputs / "update_summary.json",
+        paths.curated / "sh_510300.parquet",
+        paths.database,
+        Path(str(paths.database) + ".wal"),
+    ):
+        item: dict[str, object] = {"exists": path.is_file()}
+        if path.is_file():
+            try:
+                content = path.read_bytes()
+            except OSError as exc:
+                item["read_error"] = type(exc).__name__
+            else:
+                item.update(size=len(content), sha256=hashlib.sha256(content).hexdigest())
+                if path.suffix == ".json":
+                    try:
+                        item["payload"] = json.loads(content)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        item["parse_error"] = type(exc).__name__
+        state_files[str(path.relative_to(tmp_path))] = item
+    project = Path(__file__).resolve().parents[1]
+    identity_files = [
+        Path(__file__).resolve(),
+        project / "requirements-lock.txt",
+        *sorted((project / "src" / "finance_lab").rglob("*.py")),
+    ]
+    receipt = {
+        "schema_version": 1,
+        "data_kind": "synthetic",
+        "phase": phase,
+        "pid": process.pid,
+        "returncode": process.returncode,
+        "returncode_hex": f"0x{process.returncode & 0xFFFFFFFF:08X}",
+        "timed_out": timed_out,
+        "timeout_seconds": 20,
+        "last_marker": markers[-1] if markers else None,
+        "unparseable_trace_lines": trace_errors,
+        "child_script_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "stdout_bytes": len(stdout),
+        "stderr_bytes": len(stderr),
+        "synthetic_state": state_files,
+        "file_sha256": {
+            str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in identity_files
+        },
+    }
+    (diagnostics / "receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    context = (
+        f"diagnostics={diagnostics}; last_marker={receipt['last_marker']}; "
+        f"returncode={process.returncode}; timed_out={timed_out}; "
+        f"stderr={stderr.decode('utf-8', errors='replace')}"
+    )
+    assert not timed_out, context
+    assert process.returncode == 7, context
     assert len(pd.read_parquet(paths.curated / "sh_510300.parquet")) == 145
     assert market_update_status(paths)["status"] == "updating"
     with pytest.raises(MarketDataStateError):

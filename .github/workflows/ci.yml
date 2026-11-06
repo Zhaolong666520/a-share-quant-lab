@@ -80,7 +80,18 @@ jobs:
         run: python -m mypy src
 
       - name: pytest
-        run: python -m pytest --cov=finance_lab --cov-branch --cov-report=term-missing --cov-fail-under=80
+        env:
+          FINANCE_LAB_PROCESS_DIAGNOSTICS: ${{ runner.temp }}/finance-lab-process-diagnostics
+        run: python -m pytest --cov=finance_lab --cov-branch --cov-report=term-missing --cov-fail-under=80 --junitxml=quality-tests.xml
+
+      - name: Preserve quality process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-process-${{ matrix.python-version }}
+          path: |
+            quality-tests.xml
+            ${{ runner.temp }}/finance-lab-process-diagnostics
 
       - name: Markdown links
         run: python scripts/check_markdown_links.py
