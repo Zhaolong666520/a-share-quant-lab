@@ -361,6 +361,164 @@ def test_status_cli_is_read_only_and_has_meaningful_exit_code(
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
+def _collect_process_diagnostics(
+    diagnostics: Path,
+    outcome: dict[str, object],
+    stdout: bytes,
+    stderr: bytes,
+    code: str,
+    state_paths: tuple[Path, ...],
+    synthetic_root: Path,
+    test_file: Path,
+) -> dict[str, object]:
+    collector_errors: list[dict[str, str]] = []
+    receipt: dict[str, object] = {
+        **outcome,
+        "last_marker": None,
+        "unparseable_trace_lines": [],
+        "child_script_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "synthetic_state": {},
+        "file_sha256": {},
+        "collector_errors": collector_errors,
+    }
+
+    def collect(step: str, action: Callable[[], object]) -> None:
+        try:
+            action()
+        except Exception as exc:
+            collector_errors.append({"step": step, "type": type(exc).__name__, "error": str(exc)})
+
+    # Keep the actual process outcome separate from all subsequent evidence I/O.
+    collect(
+        "outcome_write",
+        lambda: (diagnostics / "outcome.json").write_text(
+            json.dumps(outcome, indent=2), encoding="utf-8"
+        ),
+    )
+    collect("stdout_write", lambda: (diagnostics / "stdout.txt").write_bytes(stdout))
+    collect("stderr_write", lambda: (diagnostics / "stderr.txt").write_bytes(stderr))
+
+    def read_trace() -> None:
+        trace_errors = []
+        for line in (diagnostics / "trace.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                receipt["last_marker"] = json.loads(line)
+            except json.JSONDecodeError:
+                trace_errors.append(line)
+        receipt["unparseable_trace_lines"] = trace_errors
+        if trace_errors:
+            raise ValueError("trace contains unparseable lines; raw trace retained")
+
+    collect("trace_read", read_trace)
+    state_files: dict[str, object] = {}
+    receipt["synthetic_state"] = state_files
+
+    def read_state(path: Path) -> None:
+        item: dict[str, object] = {}
+        state_files[str(path.relative_to(synthetic_root))] = item
+        try:
+            path.stat()
+        except FileNotFoundError:
+            item["exists"] = False
+            return
+        item["exists"] = True
+        content = path.read_bytes()
+        item.update(size=len(content), sha256=hashlib.sha256(content).hexdigest())
+        if path.suffix == ".json":
+            try:
+                item["payload"] = json.loads(content)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                item["parse_error"] = type(exc).__name__
+
+    for path in state_paths:
+        collect(f"state_read:{path.name}", lambda path=path: read_state(path))
+
+    def read_identity() -> None:
+        project = test_file.resolve().parents[1]
+        identity_files = [
+            test_file.resolve(),
+            project / "requirements-lock.txt",
+            *sorted((project / "src" / "finance_lab").rglob("*.py")),
+        ]
+        receipt["file_sha256"] = {
+            str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in identity_files
+        }
+
+    collect("identity_read", read_identity)
+    collect(
+        "receipt_write",
+        lambda: (diagnostics / "receipt.json").write_text(
+            json.dumps(receipt, indent=2), encoding="utf-8"
+        ),
+    )
+    return receipt
+
+
+def _assert_process_outcome(receipt: dict[str, object], diagnostics: Path, stderr: bytes) -> None:
+    context = (
+        f"diagnostics={diagnostics}; last_marker={receipt['last_marker']}; "
+        f"returncode={receipt['returncode']}; timed_out={receipt['timed_out']}; "
+        f"collector_errors={receipt['collector_errors']}; "
+        f"stderr={stderr.decode('utf-8', errors='replace')}"
+    )
+    assert not receipt["timed_out"], f"child timeout; {context}"
+    assert receipt["returncode"] == 7, f"unexpected child exit; {context}"
+    assert not receipt["collector_errors"], f"diagnostic collection failed; {context}"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "timed_out", "expected_failure"),
+    [
+        (-1073741819, False, "unexpected child exit"),
+        (7, True, "child timeout"),
+        (7, False, "diagnostic collection failed"),
+    ],
+)
+@pytest.mark.parametrize("outcome_write_fails", [False, True])
+def test_process_outcome_survives_diagnostic_io_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    timed_out: bool,
+    expected_failure: str,
+    outcome_write_fails: bool,
+) -> None:
+    state = tmp_path / "state.json"
+    state.write_text("{}", encoding="utf-8")
+    original_read_text = Path.read_text
+    original_write_text = Path.write_text
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("injected diagnostic I/O failure")
+
+    def write_outcome_only(path: Path, *args: object, **kwargs: object) -> int:
+        if path.name != "outcome.json" or outcome_write_fails:
+            raise OSError("injected receipt write failure")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_bytes", fail)
+    monkeypatch.setattr(Path, "read_bytes", fail)
+    monkeypatch.setattr(Path, "read_text", fail)
+    monkeypatch.setattr(Path, "write_text", write_outcome_only)
+    outcome = {"returncode": returncode, "timed_out": timed_out}
+    receipt = _collect_process_diagnostics(
+        tmp_path, outcome, b"", b"original stderr", "", (state,), tmp_path, Path(__file__)
+    )
+    if not outcome_write_fails:
+        saved = json.loads(original_read_text(tmp_path / "outcome.json", encoding="utf-8"))
+        assert saved == outcome
+    assert receipt["returncode"] == returncode and receipt["timed_out"] == timed_out
+    assert {error["step"] for error in receipt["collector_errors"]} == {
+        "stdout_write", "stderr_write", "trace_read", "state_read:state.json",
+        "identity_read", "receipt_write",
+    } | ({"outcome_write"} if outcome_write_fails else set())
+    with pytest.raises(AssertionError, match=expected_failure) as failure:
+        _assert_process_outcome(receipt, tmp_path, b"original stderr")
+    assert "original stderr" in str(failure.value)
+    assert "injected diagnostic I/O failure" in str(failure.value)
+
+
 @pytest.mark.parametrize("phase", ["curated", "database", "summary"])
 def test_process_death_after_publication_is_still_blocked(tmp_path: Path, phase: str) -> None:
     from finance_lab.market_data_state import MarketDataStateError, market_update_status
@@ -491,46 +649,7 @@ mark('update_return')
         timed_out = True
         process.kill()
         stdout, stderr = process.communicate()
-    (diagnostics / "stdout.txt").write_bytes(stdout)
-    (diagnostics / "stderr.txt").write_bytes(stderr)
-    trace_path = diagnostics / "trace.jsonl"
-    markers = []
-    trace_errors = []
-    if trace_path.is_file():
-        for line in trace_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                markers.append(json.loads(line))
-            except json.JSONDecodeError:
-                trace_errors.append(line)
-    state_files = {}
-    for path in (
-        paths.data / "market_update_state.json",
-        paths.outputs / "update_summary.json",
-        paths.curated / "sh_510300.parquet",
-        paths.database,
-        Path(str(paths.database) + ".wal"),
-    ):
-        item: dict[str, object] = {"exists": path.is_file()}
-        if path.is_file():
-            try:
-                content = path.read_bytes()
-            except OSError as exc:
-                item["read_error"] = type(exc).__name__
-            else:
-                item.update(size=len(content), sha256=hashlib.sha256(content).hexdigest())
-                if path.suffix == ".json":
-                    try:
-                        item["payload"] = json.loads(content)
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        item["parse_error"] = type(exc).__name__
-        state_files[str(path.relative_to(tmp_path))] = item
-    project = Path(__file__).resolve().parents[1]
-    identity_files = [
-        Path(__file__).resolve(),
-        project / "requirements-lock.txt",
-        *sorted((project / "src" / "finance_lab").rglob("*.py")),
-    ]
-    receipt = {
+    outcome = {
         "schema_version": 1,
         "data_kind": "synthetic",
         "phase": phase,
@@ -539,25 +658,21 @@ mark('update_return')
         "returncode_hex": f"0x{process.returncode & 0xFFFFFFFF:08X}",
         "timed_out": timed_out,
         "timeout_seconds": 20,
-        "last_marker": markers[-1] if markers else None,
-        "unparseable_trace_lines": trace_errors,
-        "child_script_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
         "stdout_bytes": len(stdout),
         "stderr_bytes": len(stderr),
-        "synthetic_state": state_files,
-        "file_sha256": {
-            str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in identity_files
-        },
     }
-    (diagnostics / "receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-    context = (
-        f"diagnostics={diagnostics}; last_marker={receipt['last_marker']}; "
-        f"returncode={process.returncode}; timed_out={timed_out}; "
-        f"stderr={stderr.decode('utf-8', errors='replace')}"
+    receipt = _collect_process_diagnostics(
+        diagnostics, outcome, stdout, stderr, code,
+        (
+            paths.data / "market_update_state.json",
+            paths.outputs / "update_summary.json",
+            paths.curated / "sh_510300.parquet",
+            paths.database,
+            Path(str(paths.database) + ".wal"),
+        ),
+        tmp_path, Path(__file__),
     )
-    assert not timed_out, context
-    assert process.returncode == 7, context
+    _assert_process_outcome(receipt, diagnostics, stderr)
     assert len(pd.read_parquet(paths.curated / "sh_510300.parquet")) == 145
     assert market_update_status(paths)["status"] == "updating"
     with pytest.raises(MarketDataStateError):
