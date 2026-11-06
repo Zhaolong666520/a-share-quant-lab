@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from numbers import Number
 from pathlib import Path
 
 import duckdb
@@ -16,7 +17,30 @@ from finance_lab.config import ProjectPaths
 from finance_lab.data_identity import assert_data_identity, canonical_symbol_stem
 from finance_lab.market_data_lock import market_data_lock
 from finance_lab.market_data_state import assert_market_data_readable, assert_market_data_writable
-from finance_lab.validation import assert_valid_daily_prices
+from finance_lab.validation import DataValidationError, assert_valid_daily_prices
+
+
+def _assert_storage_metadata(frame: pd.DataFrame, *, raw_snapshot: bool = False) -> None:
+    for column in ("source", "volume_unit", "adjustment"):
+        if not frame[column].map(
+            lambda value: isinstance(value, str) and bool(value.strip())
+        ).all():
+            raise DataValidationError(f"{column} 必须是非空字符串")
+    if not frame["adjustment"].eq("none").all():
+        raise DataValidationError("当前存储契约只允许不复权行情")
+    if frame["volume_unit"].nunique() != 1:
+        raise DataValidationError("同一行情文件不能混合成交量单位")
+    if raw_snapshot and frame["source"].nunique() != 1:
+        raise DataValidationError("原始快照必须来自单一来源")
+    values = frame["ingested_at"]
+    if values.map(lambda value: isinstance(value, Number)).any():
+        raise DataValidationError("采集时间不能使用数值或布尔值")
+    try:
+        timestamps = pd.to_datetime(values, errors="coerce", format="mixed", utc=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DataValidationError("采集时间无法解析") from exc
+    if timestamps.isna().any():
+        raise DataValidationError("采集时间存在空值或无法解析的值")
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -57,6 +81,7 @@ def save_raw_snapshot(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
 def _save_raw_snapshot(frame: pd.DataFrame, paths: ProjectPaths) -> Path:
     assert_valid_daily_prices(frame)
     symbol = assert_data_identity(frame)
+    _assert_storage_metadata(frame, raw_snapshot=True)
     source = _safe_path_component(str(frame["source"].iloc[0]), label="source")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     directory = _contained_path(paths.raw, source, _safe_symbol(symbol))
@@ -79,6 +104,7 @@ def _save_curated(
 ) -> Path:
     assert_valid_daily_prices(frame)
     symbol = assert_data_identity(frame)
+    _assert_storage_metadata(frame)
     if preferred_source is not None and (
         preferred_source != "tencent" or not frame["source"].eq(preferred_source).all()
     ):
@@ -87,6 +113,8 @@ def _save_curated(
     if output.exists():
         previous = pd.read_parquet(output)
         assert_data_identity(previous, filename=output.name, expected_symbol=symbol)
+        assert_valid_daily_prices(previous)
+        _assert_storage_metadata(previous)
         combined = pd.concat([previous, frame], ignore_index=True)
         combined["trade_date"] = pd.to_datetime(combined["trade_date"])
         # A temporary fallback response must not overwrite an existing preferred-source row.
@@ -102,6 +130,7 @@ def _save_curated(
     frame = frame.sort_values("trade_date").reset_index(drop=True)
     assert_valid_daily_prices(frame)
     assert_data_identity(frame, filename=output.name, expected_symbol=symbol)
+    _assert_storage_metadata(frame)
     write_parquet_atomic(frame, output)
     return output
 
@@ -118,24 +147,35 @@ def _sync_duckdb(paths: ProjectPaths) -> int:
         return 0
     escaped_files = [path.as_posix().replace(chr(39), chr(39) * 2) for path in parquet_files]
     file_list = ", ".join(f"'{path}'" for path in escaped_files)
-    with duckdb.connect(str(paths.database)) as connection:
-        # Hold the project lock across both identity preflight and table replacement.
+    # Validate every complete file before opening the destination, while holding
+    # the project lock. Missing columns must not be filled by union_by_name.
+    with duckdb.connect(":memory:") as connection:
         for path in parquet_files:
             identity = connection.execute(
                 "SELECT symbol FROM read_parquet(?)", [path.as_posix()]
             ).fetchdf()
             assert_data_identity(identity, filename=path.name)
-        connection.execute(
-            f"""
-            CREATE OR REPLACE TABLE daily_prices AS
-            SELECT * FROM read_parquet([{file_list}], union_by_name = true)
-            ORDER BY symbol, trade_date
-            """
-        )
-        result = connection.execute("SELECT COUNT(*) FROM daily_prices").fetchone()
-        if result is None:
-            return 0
-        count = int(result[0])
+            frame = connection.execute("SELECT * FROM read_parquet(?)", [path.as_posix()]).fetchdf()
+            assert_valid_daily_prices(frame)
+            _assert_storage_metadata(frame)
+    with duckdb.connect(str(paths.database)) as connection:
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.execute(
+                f"""
+                CREATE OR REPLACE TABLE daily_prices AS
+                SELECT * FROM read_parquet([{file_list}], union_by_name = true)
+                ORDER BY symbol, trade_date
+                """
+            )
+            result = connection.execute("SELECT COUNT(*) FROM daily_prices").fetchone()
+            if result is None:
+                raise RuntimeError("行情入库计数缺失")
+            count = int(result[0])
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
     return count
 
 
