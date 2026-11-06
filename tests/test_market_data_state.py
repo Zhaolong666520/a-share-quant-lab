@@ -522,9 +522,15 @@ def test_process_outcome_survives_diagnostic_io_failures(
 
 
 @pytest.mark.parametrize("phase", ["curated", "database", "summary"])
-def test_process_death_after_publication_is_still_blocked(tmp_path: Path, phase: str) -> None:
+def test_process_death_after_publication_is_still_blocked(
+    tmp_path: Path, phase: str, *, termination_mode: str = "os_exit"
+) -> None:
     from finance_lab.market_data_state import MarketDataStateError, market_update_status
 
+    if termination_mode not in {"os_exit", "terminate_process"}:
+        raise ValueError("unknown diagnostic termination mode")
+    if termination_mode == "terminate_process" and (os.name != "nt" or phase != "database"):
+        raise ValueError("TerminateProcess control is restricted to Windows/database")
     paths, _ = make_paper_test_project(tmp_path)
     diagnostics_base = Path(
         os.environ.get("FINANCE_LAB_PROCESS_DIAGNOSTICS", str(tmp_path / "process-diagnostics"))
@@ -545,6 +551,7 @@ from pathlib import Path
 
 diagnostics = Path(sys.argv[1])
 phase = sys.argv[2]
+termination_mode = sys.argv[3]
 trace = (diagnostics / 'trace.jsonl').open('x', encoding='utf-8')
 fault = (diagnostics / 'fault.txt').open('x', encoding='utf-8')
 faulthandler.enable(file=fault, all_threads=True)
@@ -552,6 +559,7 @@ faulthandler.enable(file=fault, all_threads=True)
 def mark(event, **details):
     trace.write(json.dumps({
         'event': event, 'phase': phase, 'pid': os.getpid(),
+        'termination_mode': termination_mode,
         'monotonic_ns': time.monotonic_ns(), **details,
     }) + '\\n')
     trace.flush()
@@ -563,8 +571,19 @@ from finance_lab.config import get_paths
 from finance_lab.sample import make_synthetic_daily_prices
 mark('imports_completed')
 
+if termination_mode == 'terminate_process':
+    import ctypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = ctypes.c_void_p
+    terminate_process = kernel32.TerminateProcess
+    terminate_process.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    terminate_process.restype = ctypes.c_int
+    mark('termination_bindings_ready')
+
 native_names = {
-    '_duckdb', 'duckdb.duckdb', 'pyarrow.lib',
+    '_duckdb', 'duckdb.duckdb', 'pyarrow.lib', '_ctypes',
     'numpy._core._multiarray_umath', 'numpy.core._multiarray_umath',
     'pandas._libs.interval', 'pandas._libs.tslibs.np_datetime',
 }
@@ -588,6 +607,7 @@ for name in ('duckdb', 'numpy', 'pandas', 'pyarrow', 'pytest', 'pytest-cov', 'co
         dependencies[name] = None
 environment = {
     'schema_version': 1, 'data_kind': 'synthetic',
+    'termination_mode': termination_mode,
     'python': sys.version, 'executable': sys.executable,
     'prefix': sys.prefix, 'base_prefix': sys.base_prefix,
     'platform': platform.platform(), 'machine': platform.machine(),
@@ -626,7 +646,12 @@ def interrupted(*args, **kwargs):
     original(*args, **kwargs)
     mark(phase + '_original_return')
     mark('exit_requested', requested_exit_code=7)
-    os._exit(7)
+    if termination_mode == 'os_exit':
+        os._exit(7)
+        raise RuntimeError('os._exit unexpectedly returned')
+    if not terminate_process(get_current_process(), 7):
+        raise ctypes.WinError(ctypes.get_last_error())
+    raise RuntimeError('TerminateProcess unexpectedly returned to the calling process')
 setattr(pipeline, name, interrupted)
 mark('update_enter')
 pipeline.update_market_data(date(2022, 1, 1), prices['trade_date'].max().date())
@@ -634,7 +659,7 @@ mark('update_return')
 """
     (diagnostics / "child.py").write_text(code, encoding="utf-8", newline="\n")
     process = subprocess.Popen(
-        [sys.executable, "-X", "utf8", "-c", code, str(diagnostics), phase],
+        [sys.executable, "-X", "utf8", "-c", code, str(diagnostics), phase, termination_mode],
         env={
             **os.environ,
             "FINANCE_LAB_ROOT": str(tmp_path),
@@ -655,6 +680,7 @@ mark('update_return')
         "schema_version": 1,
         "data_kind": "synthetic",
         "phase": phase,
+        "termination_mode": termination_mode,
         "pid": process.pid,
         "returncode": process.returncode,
         "returncode_hex": f"0x{process.returncode & 0xFFFFFFFF:08X}",
