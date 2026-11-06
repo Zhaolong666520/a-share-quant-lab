@@ -32,14 +32,20 @@ jobs:
         run: python -m pip install -r requirements-lock.txt
       - name: Install project
         run: python -m pip install --no-build-isolation --no-deps -e .
+      - name: Record storage environment and file identity
+        if: always()
+        run: >-
+          python -c "import hashlib, importlib.metadata as metadata, json, os, platform, sys; from pathlib import Path; files = sorted(Path('src/finance_lab').rglob('*.py')) + sorted(Path('tests').glob('*.py')) + [Path('requirements-lock.txt'), Path('pyproject.toml'), Path('.github/workflows/ci.yml')]; evidence = {'schema_version': 1, 'execution_context': os.environ.get('GITHUB_ACTIONS', 'local'), 'commit': os.environ.get('GITHUB_SHA'), 'runner_os': os.environ.get('RUNNER_OS'), 'runner_arch': os.environ.get('RUNNER_ARCH'), 'platform': platform.platform(), 'machine': platform.machine(), 'python': sys.version, 'executable': sys.executable, 'dependencies': {d.metadata['Name']: d.version for d in metadata.distributions()}, 'file_sha256': {p.as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in files if p.is_file()}}; Path(os.environ.get('STORAGE_METADATA_PATH', 'storage-environment.json')).write_text(json.dumps(evidence, indent=2), encoding='utf-8')"
       - name: Filename, ledger, recovery and frozen-session acceptance
-        run: python -m pytest tests/test_filename_audit.py tests/test_storage_portability.py tests/test_paper_schema_contract.py tests/test_paper_store.py tests/test_recovery_ledger.py tests/test_workspace_acceptance.py --junitxml=storage-acceptance.xml
+        run: python -m pytest tests/test_filename_audit.py tests/test_storage_portability.py tests/test_paper_schema_contract.py tests/test_paper_store.py tests/test_recovery_ledger.py tests/test_workspace_acceptance.py tests/test_workspace_lock_paths.py tests/test_storage_validation_boundary.py tests/test_paper_legacy_shape.py -ra --junitxml=storage-acceptance.xml
       - name: Preserve platform evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: storage-acceptance-${{ matrix.os }}
-          path: storage-acceptance.xml
+          path: |
+            storage-acceptance.xml
+            storage-environment.json
 
   quality:
     runs-on: windows-latest
