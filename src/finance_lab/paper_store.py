@@ -251,6 +251,14 @@ class PaperStore:
                 if values and max(values) == CURRENT_PAPER_SCHEMA_VERSION:
                     self._validate_schema()  # Never silently repair a malformed current ledger.
                 migrating_full_ledger = values == [1] and objects == set(_REQUIRED_SCHEMA_COLUMNS)
+                if values == [1] and not migrating_full_ledger:
+                    # Preserve initialization and the supported legacy state fragment only.
+                    # A fragment migration does not establish a recoverable ledger history.
+                    if objects not in (
+                        {"paper_schema_metadata"},
+                        {"paper_schema_metadata", "paper_state"},
+                    ):
+                        raise PaperStoreError("旧版本账本表结构不完整：禁止补齐缺失的账本表")
             self._ensure_schema_objects()
             self._validate_schema()
             connection.execute(
