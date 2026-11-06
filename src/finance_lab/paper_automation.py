@@ -19,6 +19,7 @@ from finance_lab.paper_pipeline import (
     PaperPortfolioNotFound,
     PaperReportWriteError,
 )
+from finance_lab.paper_process_evidence import ProcessEvidenceWriteError, ProcessJournal
 from finance_lab.paper_run_identity import (
     references_json,
     validate_health,
@@ -94,6 +95,7 @@ def run_paper_daily_automation(
     root: Path | None = None,
     actions: PaperAutomationActions | None = None,
     clock: Callable[[], datetime] | None = None,
+    launch_id: str | None = None,
 ) -> PaperAutomationResult:
     """Run the daily research workflow and persist success or failure evidence."""
     safe_portfolio = validate_portfolio_id(portfolio_id)
@@ -104,6 +106,7 @@ def run_paper_daily_automation(
     selected_actions = actions or _default_actions()
     selected_clock = clock or (lambda: datetime.now(UTC))
     started_at = _aware_utc(selected_clock(), "started_at")
+    journal = ProcessJournal(paths.root, safe_portfolio, effective_as_of, attempt_id, launch_id)
 
     steps: list[dict[str, str]] = []
     current_step = "market_data_update"
@@ -119,6 +122,7 @@ def run_paper_daily_automation(
     health_identity: dict[str, str] | None = None
     error: dict[str, str] | None = None
     try:
+        journal.phase(current_step)
         update_payload = selected_actions.update_market_data(
             start=start_date,
             end=effective_as_of,
@@ -137,6 +141,7 @@ def run_paper_daily_automation(
         steps.append({"name": current_step, "status": "succeeded"})
 
         current_step = "data_health"
+        journal.phase(current_step)
         health_path, health_payload = selected_actions.data_health(
             root=root,
             as_of_date=effective_as_of,
@@ -165,6 +170,7 @@ def run_paper_daily_automation(
         steps.append({"name": current_step, "status": "succeeded"})
 
         current_step = "paper_run"
+        journal.phase(current_step)
         try:
             candidate = selected_actions.run_portfolio(
                 portfolio_id=safe_portfolio,
@@ -178,6 +184,7 @@ def run_paper_daily_automation(
         except PaperPortfolioNotFound:
             steps.append({"name": current_step, "status": "portfolio_missing"})
             current_step = "paper_init"
+            journal.phase(current_step)
             candidate = selected_actions.init_portfolio(
                 portfolio_id=safe_portfolio,
                 as_of_date=effective_as_of,
@@ -187,6 +194,10 @@ def run_paper_daily_automation(
             _validate_operation(candidate, safe_portfolio, "paper_init", effective_as_of)
             operation = candidate
             steps.append({"name": current_step, "status": "succeeded"})
+    except ProcessEvidenceWriteError:
+        # This is a receipt failure, not a failure of the next business action.
+        # The launcher records the process failure; existing commit receipts remain authoritative.
+        raise
     except Exception as exc:  # The failure must be persisted before returning nonzero.
         accepted_failure = False
         if isinstance(exc, (PaperPartialOperationError, PaperReportWriteError)):
@@ -322,6 +333,7 @@ def run_paper_daily_automation(
             attempt_id=attempt_id,
             ledger_runs=ledger_runs,
         ) from exc
+    journal.archived(archive_path)
     return PaperAutomationResult(
         payload=payload,
         archive_path=archive_path,

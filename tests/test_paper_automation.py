@@ -812,11 +812,10 @@ def test_windows_daily_scripts_are_reversible_and_reject_worktrees() -> None:
         encoding="utf-8"
     )
 
-    assert "finance_lab.cli paper-daily" in runner
     assert "NotifyIcon" in runner
-    assert "$LASTEXITCODE" in runner
     assert "paper_automation_logs" in runner
-    assert "Start-Process" not in runner
+    # Child exit/output behavior is exercised with real isolated Windows workers
+    # in test_paper_process_launcher, not tied to one PowerShell invocation syntax.
     assert "Register-ScheduledTask" in installer
     assert "Unregister-ScheduledTask" in installer
     assert ".worktrees" in installer

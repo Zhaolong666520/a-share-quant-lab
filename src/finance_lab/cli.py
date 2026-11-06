@@ -449,6 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     paper_daily.add_argument("--start", type=_parse_date, default=date(2018, 1, 1))
     paper_daily.add_argument("--as-of", type=_parse_date, default=date.today())
     paper_daily.add_argument("--stale-after-business-days", type=int, default=3)
+    paper_daily.add_argument("--launch-id", help="关联启动器独立进程记录（32位十六进制ID）")
 
     account = subparsers.add_parser("account", help="对可交易标的运行现金和整数份额账本")
     _add_account_arguments(account, include_symbol=True)
@@ -970,13 +971,24 @@ def _run_command(args: argparse.Namespace) -> int:
             _print_json(_paper_operation_payload(result))
             return 0
         if args.command == "paper-daily":
+            from finance_lab.paper_process_evidence import ProcessEvidenceWriteError
+
             try:
                 automation = run_paper_daily_automation(
                     portfolio_id=args.portfolio,
                     start_date=args.start,
                     as_of_date=args.as_of,
                     stale_after_business_days=args.stale_after_business_days,
+                    **({"launch_id": args.launch_id} if args.launch_id is not None else {}),
                 )
+            except ProcessEvidenceWriteError as exc:
+                _print_json({
+                    "ok": False, "error_code": "paper_process_evidence_write_failed",
+                    "stage": exc.stage, "launch_id": exc.launch_id, "attempt_id": exc.attempt_id,
+                    "ledger_committed": None,
+                    "message": "运行留证失败；已有业务归档和账本提交须单独核验，不自动重试。",
+                })
+                return 1
             except PaperAutomationStatusWriteError as exc:
                 _print_json(
                     {

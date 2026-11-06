@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import UTC, datetime
+import math
+import re
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,88 @@ def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _request_window_context(record: dict[str, Any]) -> dict[str, Any]:
+    unknown = {
+        "state": "unknown", "primary": None, "reference": None, "relation": "unknown",
+        "explanation": "请求范围缺失或无法可靠解释；窗口内逐日覆盖未知。",
+    }
+    primary_source = record.get("primary_source")
+    windows = record.get("source_request_windows")
+    if (
+        not isinstance(primary_source, str) or primary_source not in {"akshare", "tencent"}
+        or not isinstance(windows, dict) or set(windows) != {primary_source, "baostock"}
+    ):
+        return unknown
+    parsed = {}
+    for source, role in ((primary_source, "primary"), ("baostock", "reference")):
+        window = windows[source]
+        if not isinstance(window, dict) or window.get("role") != role:
+            return unknown
+        dates = []
+        for field in ("start_date", "end_date"):
+            value = window.get(field)
+            if (
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None
+            ):
+                return unknown
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return unknown
+            dates.append(value)
+        if dates[0] > dates[1]:
+            return unknown
+        parsed[role] = {"source": source, "start_date": dates[0], "end_date": dates[1]}
+    primary, reference = parsed["primary"], parsed["reference"]
+    left = (primary["start_date"], primary["end_date"])
+    right = (reference["start_date"], reference["end_date"])
+    relation = "same" if left == right else (
+        "shorter" if left[0] <= right[0] and right[1] <= left[1] else "different"
+    )
+    explanations = {
+        "same": "两侧请求范围相同；请求范围不能证明逐日数据完整。",
+        "shorter": "对照请求范围短于主源；完整返回历史仍参与覆盖率计算。",
+        "different": "两侧请求范围不同；完整返回历史仍参与覆盖率计算。",
+    }
+    return {"state": "available", **parsed, "relation": relation,
+            "explanation": explanations[relation] + "窗口内逐日覆盖未计算，不能据此判为通过。"}
+
+
+def _comparison(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Read bounded comparison facts, never provider messages or transport details."""
+    value = record.get("source_comparison")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("status") not in {"pass", "warning"}:
+        raise ValueError("comparison_status")
+    symbol = record.get("symbol")
+    if symbol is not None and (
+        not isinstance(symbol, str) or not re.fullmatch(r"(?:sh|sz|bj)\.[0-9]{6}", symbol)
+    ):
+        raise ValueError("comparison_symbol")
+    safe = {"symbol": symbol, "status": value["status"]}
+    for name in ("common_rows", "primary_only", "secondary_only"):
+        count = value.get(name)
+        if count is not None and (type(count) is not int or count < 0):
+            raise ValueError("comparison_count")
+        safe[name] = count
+    ratio = value.get("coverage_ratio")
+    if ratio is not None and (
+        type(ratio) not in (int, float) or not 0 <= ratio <= 1 or not math.isfinite(ratio)
+    ):
+        raise ValueError("comparison_coverage")
+    safe["coverage_ratio"] = ratio
+    safe["coverage_scope"] = "all_returned_rows"
+    safe["coverage_explanation"] = (
+        "覆盖率为共同日期行数除以两侧规范化后参与比较的总行数较大值；"
+        "不是供应商原始响应行数，未按共同请求窗口裁剪。"
+        "覆盖率缺失时为未知；该统计不证明请求历史完整。"
+    )
+    safe["request_window_context"] = _request_window_context(record)
+    return safe
+
+
 def _source_summary(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("summary")
@@ -43,9 +127,11 @@ def _source_summary(payload: Any) -> dict[str, Any]:
     successful = failed = 0
     offline = False
     evidence_failed = False
+    comparisons: list[dict[str, Any] | None] = []
     for record in records:
         if not isinstance(record, dict) or not record:
             raise ValueError("record")
+        comparisons.append(_comparison(record))
         rows, errors = record.get("rows"), record.get("source_errors")
         if type(rows) is not int or rows < 0 or not isinstance(errors, dict):
             raise ValueError("record_counts")
@@ -100,6 +186,7 @@ def _source_summary(payload: Any) -> dict[str, Any]:
         raise ValueError("summary_status")
     if evidence_failed and outcome == "success":
         raise ValueError("hidden_failure")
+    warnings = [item for item in comparisons if item is not None and item["status"] == "warning"]
     return {
         "source_outcome": outcome,
         "source_outcome_origin": "recorded" if "status" in payload else "derived",
@@ -110,6 +197,10 @@ def _source_summary(payload: Any) -> dict[str, Any]:
         else "derived",
         "failed_sources_origin": "recorded" if "failed_sources" in payload else "derived",
         "offline_recovery_hint": offline,
+        "source_comparison_state": "warning"
+        if warnings else "pass" if all(item is not None for item in comparisons) else "unknown",
+        "source_comparison_warning_count": len(warnings),
+        "source_comparison_warnings": warnings,
     }
 
 
@@ -129,6 +220,9 @@ def _market(root: Path, observer: Observation, notes: list[dict[str, str]]) -> d
         "successful_instruments": None,
         "failed_sources": None,
         "offline_recovery_hint": None,
+        "source_comparison_state": "unknown",
+        "source_comparison_warning_count": None,
+        "source_comparison_warnings": [],
     }
     try:
         raw_marker = observer.read(root / "data" / "market_update_state.json", "market")
@@ -183,6 +277,8 @@ def _market(root: Path, observer: Observation, notes: list[dict[str, str]]) -> d
             result["reason"] = "summary_conflict"
         if result["source_outcome"] != "success":
             notes.append(diagnostic("market_sources_not_success", "market"))
+        if result["source_comparison_state"] == "warning":
+            notes.append(diagnostic("source_comparison_warning", "market"))
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         result.update(state="unavailable", reason="market_evidence_invalid")
         notes.append(diagnostic("market_evidence_invalid", "market"))
@@ -321,7 +417,64 @@ def _error(code: str) -> dict[str, Any]:
     }
 
 
-def inspect_paper_operational_status(root: Path, portfolio_id: str) -> dict[str, Any]:
+def _invalidate_sections(
+    automation: dict[str, Any], market: dict[str, Any], ledger: dict[str, Any], changed: set[str],
+    *, notes: list[dict[str, str]],
+) -> None:
+    """Use the same withdrawal rules for the inner and final observation checks."""
+    for section in sorted(changed):
+        if section == "automation":
+            automation.update(
+                state="changed", latest_attempt=None, last_success=None,
+                latest_candidates=[], last_success_candidates=[],
+            )
+            automation["scan"]["complete"] = False
+            automation["scan"]["visible_archive_count"] = None
+            automation["latest_mirror"] = {"state": "changed"}
+        elif section == "market":
+            market.update(
+                state="changed", publication_state="unknown", batch_id=None, phase=None,
+                reason="input_changed", isolated=None, summary_state="changed",
+                summary_fingerprint_matched=None, source_outcome="unknown",
+                source_outcome_origin="unknown", successful_instruments=None,
+                failed_sources=None, successful_instruments_origin="unknown",
+                failed_sources_origin="unknown", offline_recovery_hint=None,
+                source_comparison_state="unknown", source_comparison_warning_count=None,
+                source_comparison_warnings=[],
+            )
+        elif section == "ledger":
+            ledger.update(
+                state="changed", audit_status="unknown", accounts=[], last_valuation_date=None
+            )
+    if changed and ledger["correlation"]["status"] != "not_available":
+        ledger["correlation"] = {"status": "unavailable", "reason": "input_changed"}
+    if "market" in changed:
+        notes[:] = [item for item in notes if item["code"] != "source_comparison_warning"]
+
+
+def _invalidate_recorded_observation(
+    result: dict[str, Any], changed: set[str]
+) -> dict[str, Any]:
+    """Withdraw derived facts after a later check of the same observation inputs."""
+    changed = changed & {"automation", "market", "ledger"}
+    if not changed:
+        return result
+    automation, market, ledger = result["automation"], result["market"], result["ledger"]
+    _invalidate_sections(automation, market, ledger, changed, notes=result["diagnostics"])
+    for section in sorted(changed):
+        note = diagnostic("input_changed", section)
+        if note not in result["diagnostics"]:
+            result["diagnostics"].append(note)
+    result["automation_ledger_correlation"] = ledger["correlation"]["status"]
+    result["report"] = _report(automation)
+    result["observation"]["input_changed"] = True
+    result.update(status="attention", command_exit_code=1)
+    return result
+
+
+def inspect_paper_operational_status(
+    root: Path, portfolio_id: str, *, _observer: Observation | None = None
+) -> dict[str, Any]:
     started = _now()
     try:
         portfolio = validate_portfolio_id(portfolio_id)
@@ -331,7 +484,11 @@ def inspect_paper_operational_status(root: Path, portfolio_id: str) -> dict[str,
         root = validate_root(root)
     except (OSError, ValueError):
         return _error("root_invalid")
-    observer = Observation(root)
+    if _observer is not None and (
+        not isinstance(_observer, Observation) or _observer.root != root
+    ):
+        return _error("observation_root_invalid")
+    observer = Observation(root) if _observer is None else _observer
     notes: list[dict[str, str]] = []
     # Fixed directory memberships, including missing directories, are observation inputs.
     for directory, section in ((root / "data", "market"), (root / "outputs", "automation")):
@@ -349,21 +506,7 @@ def inspect_paper_operational_status(root: Path, portfolio_id: str) -> dict[str,
     changed = observer.changed()
     for section in sorted(changed):
         notes.append(diagnostic("input_changed", section))
-        if section == "automation":
-            automation.update(state="changed", latest_attempt=None, last_success=None)
-            automation["scan"]["complete"] = False
-        elif section == "market":
-            market.update(
-                state="changed",
-                publication_state="unknown",
-                source_outcome="unknown",
-                isolated=None,
-                summary_fingerprint_matched=None,
-            )
-        elif section == "ledger":
-            ledger.update(
-                state="changed", audit_status="unknown", accounts=[], last_valuation_date=None
-            )
+    _invalidate_sections(automation, market, ledger, changed, notes=notes)
     report = _report(automation)
     if changed and ledger_identity is not None and ledger_identity["scope"] != "unknown":
         ledger["correlation"] = {"status": "unavailable", "reason": "input_changed"}

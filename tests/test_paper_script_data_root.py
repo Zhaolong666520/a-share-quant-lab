@@ -150,28 +150,30 @@ def test_default_root_and_finally_at_interpreter_boundary(scripts, tmp_path, exi
     project, directory = scripts
     runner = directory / "run_paper_daily.ps1"
     source = runner.read_text(encoding="utf-8-sig")
-    start = source.index("        $commandOutput = & $Python")
-    end = source.index("2>&1", start) + len("2>&1")
+    start = source.index("    $arguments = @(")
+    end = source.index("    $child = Start-Process", start)
     # Approved success-only native boundary: real Python prints observed env.
     # No paper-daily/source/network calls; main explicit/env tests use real CLI.
     probe = tmp_path / "native_probe.py"
+    observed = tmp_path / "native_observed.txt"
     probe.write_text(
-        'import os, sys\nprint("OBSERVED:"+os.environ.get("FINANCE_LAB_ROOT", "absent"))\n'
+        "import os, sys\nfrom pathlib import Path\n"
+        + f'Path({str(observed)!r}).write_text(os.environ.get("FINANCE_LAB_ROOT", "absent"))\n'
         + ('sys.stderr.write("native boundary stderr\\n")\n' if exit_code else "")
         + f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
     source = (
         source[:start]
-        + "        $commandOutput = & $Python -B "
-        + _quote(probe)
-        + " 2>&1"
+        + "    $arguments = @('-B', "
+        + _quote('"' + str(probe) + '"')
+        + ")\n"
         + source[end:]
     )
     runner.write_text(source, encoding="utf-8-sig")
-    assert "-m finance_lab.cli" not in source
+    assert "finance_lab.paper_process_worker" not in source
     state, output = _invoke_runner(scripts, tmp_path, unset_env=True)
-    assert "OBSERVED:" + str(project) in output
+    assert observed.read_text() == str(project), output
     assert state == {"code": exit_code, "root": None, "utf8": "0", "cwd": str(tmp_path)}
     logs = list((project / "outputs" / "paper_automation_logs").glob("*.log"))
     assert len(logs) == 1

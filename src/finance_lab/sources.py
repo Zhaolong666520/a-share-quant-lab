@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, date, datetime
+from importlib.metadata import version as package_version
 
 import numpy as np
 import pandas as pd
@@ -165,8 +166,60 @@ def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFram
         },
     )
 
+_BAOSTOCK_VERSION = "0.9.3"
+_BAOSTOCK_PAGE_SIZE = 2000
+
+
+def _baostock_page_number(value: object) -> int | None:
+    if type(value) is int:
+        return value if 0 < value <= 2**31 - 1 else None
+    if (isinstance(value, str) and value.isascii() and value.isdigit()
+            and len(value) <= 10):
+        number = int(value)
+        return number if 0 < number <= 2**31 - 1 else None
+    return None
+
+
+def _assert_baostock_complete(result: object, received: int) -> None:
+    """Reject ambiguous termination using the verified SDK 0.9.3 page semantics."""
+    if getattr(result, "error_code", None) != "0":
+        raise DataSourceError(
+            "BaoStock 迭代结束时返回错误 (iteration_error_code)",
+            stage="iteration", received_rows=received,
+        )
+    data = getattr(result, "data", None)
+    cursor = getattr(result, "cur_row_num", None)
+    page = _baostock_page_number(getattr(result, "cur_page_num", None))
+    page_size = _baostock_page_number(getattr(result, "per_page_count", None))
+    page_rows = len(data) if isinstance(data, list) else None
+    valid = (
+        page_rows is not None and type(cursor) is int and cursor == page_rows
+        and page is not None and page_size == _BAOSTOCK_PAGE_SIZE
+        and received == (page - 1) * _BAOSTOCK_PAGE_SIZE + page_rows
+    )
+    if not valid or page_rows == _BAOSTOCK_PAGE_SIZE:
+        reason = "pagination_state_invalid" if not valid else "pagination_completion_unknown"
+        safe_cursor = cursor if type(cursor) is int and 0 <= cursor <= received else None
+        raise DataSourceError(
+            f"BaoStock 分页完成未确认 ({reason}; page_rows={page_rows}, "
+            f"cursor={safe_cursor}, page={page}, page_size={page_size})",
+            stage="iteration", received_rows=received,
+        )
+    # An exhausted full page can mean a swallowed receive failure. An explicit
+    # empty/short tail or a >2000-row packet is terminal in SDK 0.9.3; the latter
+    # is explicitly supported by ResultData.next(). Normal row checks still run.
+
+
 def fetch_baostock(instrument: Instrument, start: date, end: date) -> pd.DataFrame:
     """Fetch unadjusted daily bars from BaoStock as an independent check source."""
+    try:
+        sdk_version = package_version("baostock")
+    except Exception as exc:
+        raise DataSourceError("BaoStock 版本无法确认", stage="import") from exc
+    if sdk_version != _BAOSTOCK_VERSION:
+        raise DataSourceError(
+            "BaoStock 版本未验证 (unsupported_sdk_version)", stage="import",
+        )
     try:
         import baostock as bs
     except Exception as exc:
@@ -201,6 +254,7 @@ def fetch_baostock(instrument: Instrument, start: date, end: date) -> pd.DataFra
                 raise DataSourceError(
                     "BaoStock 结果迭代失败", stage="iteration", received_rows=len(rows)
                 ) from exc
+            _assert_baostock_complete(result, len(rows))
             raw = pd.DataFrame(rows, columns=result.fields)
         finally:
             primary_failed = sys.exc_info()[0] is not None

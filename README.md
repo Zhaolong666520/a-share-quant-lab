@@ -8,11 +8,13 @@
 
 [简体中文](README.md) · [English quick start](docs/quickstart.en.md)
 
+2026-11-01 接续入口：[项目总纲](docs/项目总纲.md) · [当前状态与未完成项](docs/项目当前状态.md) · [用户决定记录](docs/项目决定记录.md) · [接续协议](docs/项目接续协议.md)。后续状态与历史设计按日期区分：分页保护已验收为独立候选，尚未接入正式任务；P3完整持续验收及P4/P5仍未完成。
+
 当前本地能力、真实命令与历史验收证据见[当前成果与验收索引](docs/当前成果与验收索引.md)。本地版本仍为 0.9.1；开发成果不等于已发布，P3 真实持续运行及 P4/P5 仍未完成。
 
 开发中：[v1.0 设计与验收方案](docs/superpowers/specs/2026-09-18-v1-design.md) · [第一步实施计划与进度](docs/superpowers/plans/2026-09-18-parquet-publication.md)。方案中的后续功能尚未交付。
 
-最新本地进度：[数据源离线契约](docs/superpowers/plans/2026-09-25-source-contract.md)；此前已加入[离线行情候选重建](docs/superpowers/plans/2026-09-25-offline-market-rebuild.md)、[恢复材料准备与校验](docs/superpowers/plans/2026-09-23-market-recovery-copy.md)、[未完成批次隔离](docs/superpowers/plans/2026-09-20-incomplete-market-update.md)、[行情并发访问保护](docs/superpowers/plans/2026-09-18-market-data-lock.md)与[标的身份校验](docs/superpowers/plans/2026-09-18-symbol-identity.md)。
+9月25日历史进度：[数据源离线契约](docs/superpowers/plans/2026-09-25-source-contract.md)；此前已加入[离线行情候选重建](docs/superpowers/plans/2026-09-25-offline-market-rebuild.md)、[恢复材料准备与校验](docs/superpowers/plans/2026-09-23-market-recovery-copy.md)、[未完成批次隔离](docs/superpowers/plans/2026-09-20-incomplete-market-update.md)、[行情并发访问保护](docs/superpowers/plans/2026-09-18-market-data-lock.md)与[标的身份校验](docs/superpowers/plans/2026-09-18-symbol-identity.md)。
 
 遇到“行情更新状态不可用”，先运行 `finance-lab data-update-status` 只读诊断。恢复材料命令可保存现场；离线候选重建命令可从明确指定的原始快照生成并复核新目录。候选不会自动解除隔离或切换正式项目，详见[数据说明](docs/数据说明.md)。
 
@@ -213,6 +215,42 @@ finance-lab manifest --as-of 2026-10-08
 及[验收记录](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)。
 设计与本批验收范围见[U4 设计](docs/superpowers/specs/2026-10-04-paper-operational-status-design.md)
 和[第一组三分之一交付计划](docs/superpowers/plans/2026-10-04-first-third-execution.md)。
+
+检查每日运行是否达到明确的预期交易日，并同时读取 Windows 任务快照：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_runtime_status --root C:\quant\runtime --portfolio default --expected-as-of 2026-10-15
+```
+
+请替换为实际运行根及**预期已经完成估值的交易日**。日期必填，不根据今天、周末或计划时间
+猜测休市与漏跑；例如当天尚未到计划时间时，可指定此前应完成的交易日。未来日期或非法参数退出 2。
+这个独立入口分别展示计划的下一次时间、系统最近启动与完成码、最近可校验应用归档、最后成功、
+日志中较新的启动/终态、行情未完成标记和账本最后估值日。旧成功不能盖住较新的未归档启动或失败；
+归档中派生的退出码与系统任务结果保持分开，`no-op` 不表示新增账本提交。
+
+Windows 查询仅通过随包附带的固定 PowerShell 脚本读取任务及可用的 107/110 启动事件，15 秒查询超时。
+权限不足、缺少工具、非 Windows、过期/非法快照或缺少事件证据均保留未知，不把未知说成成功。
+可以加 `--no-scheduler` 完全跳过系统查询，或用 `--task-name` 指定根路径下的其他任务名；
+这些情况仍不会证明指定任务与应用归档精确关联。下一计划时间不保证届时实际执行，
+时间触发器也可能在恢复可用后延迟执行；触发来源只按实际可读取的事件显示。
+系统的“就绪/尚未运行”等非完成状态码保留未知，不能按普通非零退出码一律报成动作失败。
+查询输出在读取时受限，stderr不留存，超限或超时仅回收本工具持有的查询进程。
+月日志按完整组合名隔离并增量选择最新记录；最新请求日期未来也会使日志证据未知。
+系统查询结束后还会重核本次已读取的应用归档、更新摘要、账本及WAL：若期间变化，
+`changed_sections` 明示受影响部分，相关成功、估值或关联结论降为未知，退出码为1。
+这一步只比较采集到的文件与目录身份，不重新打开变化后的数据库，也不自动补跑。
+已匹配更新摘要中的来源对照警告会单列为 `source_comparison_warning`，显示已记录的覆盖率和行数，
+并使诊断退出1；采集成功仍保留为 `source_outcome=success`，不会把警告改写成抓取失败。
+旧摘要缺少对照字段时保留未知，不补判全通过；此入口不重新计算对照或改变数据源规则。
+
+检查退出码为 0/1/2（`ok` / `attention` / `error`），与被查询任务的历史返回码不是同一个值。
+`attention` 包括预期日期未达到、数据隔离、有启动但缺少后续归档、运行中、系统未知或其他
+底层只读检查异常。日志和 `updating` 标记都不能确认进程仍活着或确定故障原因；
+日志终态不能替代应用归档。跨系统观察不是原子快照，不能排除 ABA 或检查结束后的变化。
+本入口不启动、补跑或修改任务，不更新行情、账本、报告或锁，不新增监控；
+也不重验当前行情健康、报告文件完整性或自然运行验收。设计与边界见
+[本批设计](docs/superpowers/specs/2026-10-16-paper-runtime-status-design.md)和
+[本地验收记录](docs/superpowers/plans/2026-10-16-paper-runtime-status-report.md)。
 
 验收一段每日模拟运行，可先捕获账本基线，再核对该区间全部新归档：
 

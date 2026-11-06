@@ -211,7 +211,11 @@ class _BaoResult:
         self.error_code = "0"
         self.error_msg = ""
         self.rows = rows
+        self.data = rows
         self.index = 0
+        self.cur_row_num = 0
+        self.cur_page_num = "1"
+        self.per_page_count = 2000
         self.fail_iteration = fail_iteration
 
     def next(self) -> bool:
@@ -220,6 +224,7 @@ class _BaoResult:
         if self.index >= len(self.rows):
             return False
         self.index += 1
+        self.cur_row_num = self.index
         return True
 
     def get_row_data(self) -> list[str]:

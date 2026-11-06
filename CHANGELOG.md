@@ -6,6 +6,7 @@
 
 ### Added
 
+- 独立只读每日运行诊断 `python -B -m finance_lab.paper_runtime_status`：显式指定预期交易日，分开展示系统调度、应用归档、日志启动/终态、行情隔离和账本日期；旧成功不掩盖未完成运行，未知不误报正常，不触发补跑；[设计与边界](docs/superpowers/specs/2026-10-16-paper-runtime-status-design.md)。
 - 独立严格只读状态汇总入口 `python -B -m finance_lab.paper_operational_status`：区分最近运行、最后有效成功、行情发布/来源、账本估值与报告生成记录，不生成报告或补建目录/锁；[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。
 - schema2 运行归档的独立 `attempt_id`、实际事务提交收据及只读精确关联：区分完整、部分、无新增和未知，不按日期或最新行猜测；旧 schema1 归档不改写；[运行身份验收](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)。
 - 只读运行区间验收入口 `python -B -m finance_lab.paper_run_acceptance capture` / `verify`：捕获五表与归档基线，保护原历史，完整覆盖实际新增提交，核对末次同日期重复 no-op；[工具与隔离演练验收](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)。这些工具不代表正式恢复、持续调度、实时健康或报告文件验收；命令与剩余范围见[当前成果索引](docs/当前成果与验收索引.md)。
@@ -27,6 +28,8 @@
 
 ### Changed
 
+- 只读运行诊断显式显示更新摘要已有的来源对照警告及可用覆盖率，返回attention但保留原采集成功事实；旧对照字段缺失保留未知，不修改来源或阈值。
+- 每日只读运行诊断在系统查询后复核应用、行情摘要和账本证据；变化时清除受影响的派生结论并保留未知，不重开变化后的数据库。调度查询的前后字段变化或二次读取失败也不再输出可用快照。
 - 行情抓取不再静默丢弃坏日期或非数值行；同日多条、超出请求范围和异常数值直接失败。批次提交状态与数据源成功状态分开显示，部分来源失败时 CLI 返回非零，每日模拟盘不推进。
 - 项目版本号由 `finance_lab.__version__` 单点维护，打包脚本默认自动读取。
 - 模拟盘账本迁移改为事务执行，并核验所需表与字段、拒绝未来版本数据库；完整类型和约束验收纳入 v1.0 计划。
