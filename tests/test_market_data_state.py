@@ -515,6 +515,8 @@ def test_process_outcome_survives_diagnostic_io_failures(
     } | ({"outcome_write"} if outcome_write_fails else set())
     with pytest.raises(AssertionError, match=expected_failure) as failure:
         _assert_process_outcome(receipt, tmp_path, b"original stderr")
+    assert f"returncode={returncode}" in str(failure.value)
+    assert f"timed_out={timed_out}" in str(failure.value)
     assert "original stderr" in str(failure.value)
     assert "injected diagnostic I/O failure" in str(failure.value)
 
