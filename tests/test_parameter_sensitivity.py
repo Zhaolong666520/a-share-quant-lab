@@ -11,6 +11,7 @@ from finance_lab.cli import build_parser
 from finance_lab.config import get_paths
 from finance_lab.parameter_sensitivity import run_parameter_sensitivity
 from finance_lab.parameter_sensitivity_report import write_parameter_sensitivity_report
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.validation import DataValidationError
 
@@ -226,6 +227,7 @@ def test_parameter_report_creates_html_json_chart_and_csv(tmp_path: Path) -> Non
     outputs = write_parameter_sensitivity_report(result, get_paths(tmp_path))
 
     assert all(path.exists() and path.stat().st_size > 0 for path in outputs)
+    assert verify_report_bundle(outputs[0])["files_checked"] == len(outputs)
     report_text = outputs[0].read_text(encoding="utf-8")
     assert "参数稳健性检验" in report_text
     assert "不是参数优化" in report_text

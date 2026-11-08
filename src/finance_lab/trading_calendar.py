@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -142,5 +143,6 @@ def load_project_sse_trading_calendar(project_root: Path) -> SSETradingCalendar:
     configured_path = project_root / "config" / "sse_trading_calendar.json"
     if configured_path.exists():
         return load_sse_trading_calendar(configured_path)
-    bundled_path = Path(__file__).resolve().parents[2] / "config" / configured_path.name
-    return load_sse_trading_calendar(bundled_path)
+    resource = files("finance_lab").joinpath("resources", configured_path.name)
+    with as_file(resource) as bundled_path:
+        return load_sse_trading_calendar(bundled_path)

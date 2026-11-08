@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 import finance_lab.paper_pipeline as paper_pipeline_module
+from finance_lab.cli import main
 from finance_lab.config import ProjectPaths
 from finance_lab.paper_pipeline import (
     PaperDataGateError,
@@ -422,17 +423,61 @@ def test_paper_status_uses_hash_chained_open_evidence_without_curated_file(
 def test_report_failure_does_not_rollback_committed_paper_ledger(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     _paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
     as_of_date = prices["trade_date"].max().date()
+    monkeypatch.setenv("FINANCE_LAB_ROOT", str(tmp_path))
 
     def fail_report(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("injected report failure")
 
     with monkeypatch.context() as scoped:
         scoped.setattr(paper_pipeline_module, "write_paper_report", fail_report)
-        with pytest.raises(RuntimeError, match="injected report failure"):
-            paper_init_portfolio(root=tmp_path, as_of_date=as_of_date)
+        assert main(["paper-init", "--as-of", as_of_date.isoformat()]) == 1
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["error_code"] == "paper_report_write_failed"
+    assert payload["stage"] == "write_paper_report"
+    assert payload["ledger_committed"] is True
+    assert payload["processed_dates"] == [as_of_date.isoformat()]
+    assert payload["report_complete"] is False
+    assert "paper-status" in payload["next_action"]
+    assert "injected report failure" not in output.out + output.err
 
     status = paper_status_portfolio(root=tmp_path)
     assert status.status == "status"
+
+
+def test_paper_run_report_failure_preserves_processed_dates_and_noop_is_not_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    paths, prices = make_paper_test_project(tmp_path, rising_prices=True)
+    created_on = prices["trade_date"].max().date()
+    paper_init_portfolio(root=tmp_path, as_of_date=created_on)
+    updated, latest_date = _append_rising_bars(paths, prices, count=2)
+    expected_dates = [item.date().isoformat() for item in updated["trade_date"].tail(2)]
+    monkeypatch.setenv("FINANCE_LAB_ROOT", str(tmp_path))
+
+    def fail_report(*_args: object, **_kwargs: object) -> object:
+        raise OSError("private report failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(paper_pipeline_module, "write_paper_report", fail_report)
+        assert main(["paper-run", "--as-of", latest_date.isoformat()]) == 1
+    first = json.loads(capsys.readouterr().out)
+    assert first["ledger_committed"] is True
+    assert first["operation_status"] == "processed"
+    assert first["processed_dates"] == expected_dates
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(paper_pipeline_module, "write_paper_report", fail_report)
+        assert main(["paper-run", "--as-of", latest_date.isoformat()]) == 1
+    second = json.loads(capsys.readouterr().out)
+    assert second["ledger_committed"] is False
+    assert second["operation_status"] == "no-op"
+    assert second["processed_dates"] == []
+    assert paper_status_portfolio(root=tmp_path).states[0].last_trade_date == latest_date

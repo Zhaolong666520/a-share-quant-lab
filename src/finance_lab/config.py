@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 
 
@@ -36,15 +37,27 @@ class ProjectPaths:
             directory.mkdir(parents=True, exist_ok=True)
 
 
-def project_root() -> Path:
+def select_project_root(root: Path | None = None) -> Path:
+    """Select the effective input root without resolving away path links."""
+    if root is not None:
+        return root
     configured = os.environ.get("FINANCE_LAB_ROOT")
     if configured:
-        return Path(configured).expanduser().resolve()
-    return Path(__file__).resolve().parents[2]
+        return Path(configured).expanduser()
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "pyproject.toml").is_file() and (
+        source_root / "src" / "finance_lab" / "config.py"
+    ).is_file():
+        return source_root
+    return Path.cwd()
+
+
+def project_root() -> Path:
+    return select_project_root().resolve()
 
 
 def get_paths(root: Path | None = None) -> ProjectPaths:
-    resolved = (root or project_root()).resolve()
+    resolved = select_project_root(root).resolve()
     paths = ProjectPaths(
         root=resolved,
         data=resolved / "data",
@@ -64,3 +77,16 @@ def load_instruments(root: Path | None = None) -> list[Instrument]:
     if not instruments:
         raise ValueError("config/instruments.json 至少需要一个标的")
     return instruments
+
+
+def initialize_instruments(root: Path | None = None) -> tuple[Path, bool]:
+    """Create the example configuration once; never replace user configuration."""
+    target = (root or project_root()) / "config" / "instruments.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    example = files("finance_lab").joinpath("resources", "instruments.json").read_bytes()
+    try:
+        with target.open("xb") as stream:
+            stream.write(example)
+    except FileExistsError:
+        return target, False
+    return target, True

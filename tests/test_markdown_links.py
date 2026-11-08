@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKER = PROJECT_ROOT / "scripts" / "check_markdown_links.py"
 
@@ -30,7 +32,7 @@ def test_checker_reports_source_and_target_for_missing_local_link(tmp_path: Path
     assert "docs/missing.md" in result.stdout
 
 
-def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) -> None:
+def test_checker_ignores_remote_mailto_and_anchor_links(tmp_path: Path) -> None:
     guide = tmp_path / "guide.md"
     guide.write_text(
         "\n".join(
@@ -38,7 +40,6 @@ def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) ->
                 "[Website](https://example.com/docs)",
                 "[Email](mailto:maintainer@example.com)",
                 "[Section](#next-step)",
-                "![Diagram](missing-image.png)",
             ]
         ),
         encoding="utf-8",
@@ -50,15 +51,46 @@ def test_checker_ignores_remote_mailto_anchor_and_image_links(tmp_path: Path) ->
     assert result.stdout == ""
 
 
-def test_default_check_covers_repository_entrypoint_documents() -> None:
+def test_checker_reports_missing_local_image(tmp_path: Path) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text("![Diagram](missing-image.png)\n", encoding="utf-8")
+
+    result = _run_checker(guide)
+
+    assert result.returncode == 1
+    assert "missing-image.png" in result.stdout
+
+
+def test_default_check_covers_every_repository_markdown_file() -> None:
     result = _run_checker()
+    expected_documents = sorted(
+        path
+        for path in PROJECT_ROOT.rglob("*.md")
+        if not any(
+                part
+                in {
+                    ".git",
+                    ".mypy_cache",
+                    ".pytest_cache",
+                    ".ruff_cache",
+                    ".venv",
+                    ".worktrees",
+                    "build",
+                    "dist",
+                    "smoke-venv",
+                }
+            or part.startswith(("package_staging_", "package_verify_"))
+            for part in path.relative_to(PROJECT_ROOT).parts
+        )
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Checked 4 Markdown files" in result.stdout
+    assert f"Checked {len(expected_documents)} Markdown files" in result.stdout
     assert "README.md" in result.stdout
     assert "CONTRIBUTING.md" in result.stdout
-    assert "docs/快速开始.md" in result.stdout
-    assert "docs/quickstart.en.md" in result.stdout
+    assert "experiments/008_forward_paper_trading.md" in result.stdout
+    assert ".pytest_cache" not in result.stdout
+    assert "smoke-venv" not in result.stdout
 
 
 def test_checker_resolves_a_local_file_before_its_fragment(tmp_path: Path) -> None:
@@ -79,3 +111,39 @@ def test_release_package_requires_checker_and_its_tests() -> None:
 
     assert '"scripts\\check_markdown_links.py"' in package_script
     assert '"tests\\test_markdown_links.py"' in package_script
+
+
+@pytest.mark.parametrize("filename", ["项目总纲.md", "项目当前状态.md", "项目决定记录.md"])
+def test_governance_local_paths_keep_repository_links_strict(tmp_path: Path, filename: str) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / filename
+    guide.write_text(
+        "本机封存材料，不随仓库分发：`../.planning/absent/report.md#evidence`，"
+        "`D:/FinanceLab/handoff/absent/report.md`。\n"
+        "[Repository document](repository.md#details)\n",
+        encoding="utf-8",
+    )
+
+    missing = _run_checker(guide)
+    assert missing.returncode == 1
+    assert str(guide) in missing.stdout
+    assert "repository.md#details" in missing.stdout
+    assert "absent/report.md" not in missing.stdout
+
+    (docs / "repository.md").write_text("# Details\n", encoding="utf-8")
+    complete = _run_checker(guide)
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+
+
+def test_checker_does_not_exempt_missing_planning_markdown_links(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / "guide.md"
+    guide.write_text("[Evidence](../.planning/missing.md)\n", encoding="utf-8")
+
+    result = _run_checker(guide)
+
+    assert result.returncode == 1
+    assert str(guide) in result.stdout
+    assert "../.planning/missing.md" in result.stdout

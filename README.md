@@ -8,6 +8,22 @@
 
 [简体中文](README.md) · [English quick start](docs/quickstart.en.md)
 
+2026-11-01 接续入口：[项目总纲](docs/项目总纲.md) · [当前状态与未完成项](docs/项目当前状态.md) · [用户决定记录](docs/项目决定记录.md) · [接续协议](docs/项目接续协议.md)。后续状态与历史设计按日期区分：分页保护已验收为独立候选，尚未接入正式任务；P3完整持续验收及P4/P5仍未完成。
+
+当前本地能力、真实命令与历史验收证据见[当前成果与验收索引](docs/当前成果与验收索引.md)。本地版本仍为 0.9.1；开发成果不等于已发布，P3 真实持续运行及 P4/P5 仍未完成。
+
+开发中：[v1.0 设计与验收方案](docs/superpowers/specs/2026-09-18-v1-design.md) · [第一步实施计划与进度](docs/superpowers/plans/2026-09-18-parquet-publication.md)。方案中的后续功能尚未交付。
+
+9月25日历史进度：[数据源离线契约](docs/superpowers/plans/2026-09-25-source-contract.md)；此前已加入[离线行情候选重建](docs/superpowers/plans/2026-09-25-offline-market-rebuild.md)、[恢复材料准备与校验](docs/superpowers/plans/2026-09-23-market-recovery-copy.md)、[未完成批次隔离](docs/superpowers/plans/2026-09-20-incomplete-market-update.md)、[行情并发访问保护](docs/superpowers/plans/2026-09-18-market-data-lock.md)与[标的身份校验](docs/superpowers/plans/2026-09-18-symbol-identity.md)。
+
+遇到“行情更新状态不可用”，先运行 `finance-lab data-update-status` 只读诊断。恢复材料命令可保存现场；离线候选重建命令可从明确指定的原始快照生成并复核新目录。候选不会自动解除隔离或切换正式项目，详见[数据说明](docs/数据说明.md)。
+
+新增本地能力：人工确认候选后验收至独立项目目录；一次冻结完整研究会话，让后续 15 个研究命令通过 `--session` 共用同一份数据和配置。使用方法及切换/回退协议见[恢复验收与研究会话](docs/恢复验收与研究会话.md)。
+
+账本已补完整结构契约、非空旧版本迁移和异常回滚验收；Windows、Ubuntu、macOS 存储验收均已实跑通过，详见[账本结构与跨平台验收](docs/账本结构与跨平台验收.md)。
+
+按[运行恢复与每日可靠性计划](docs/superpowers/plans/2026-10-04-operational-recovery.md)，已完成材料保存、人工确认后的独立离线恢复验收及 U4 只读状态读取器的[本地验收](docs/superpowers/plans/2026-10-04-first-third-acceptance.md)。新增[运行身份关联](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)和[区间验收工具](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)，核对完整新归档、实际提交和重复无新增。[10月8日受控处理](docs/superpowers/plans/2026-10-08-runtime-recovery-report.md)新增脚本显式数据根及同源指数接口修复，但真实来源请求仍失败；未接入新根，原任务已恢复原配置和启用状态，正式恢复运行仍待后续。
+
 ![A-Share Quant Lab：可复现、可审计、拒绝未来函数](docs/assets/social-preview.jpg)
 
 一个面向初学者的、**可复现且可审计**的 A 股量化研究实验室。它不负责告诉你“明天买什么”，而是帮助你把数据来源、实验参数、交易成本、执行限制和现金账本逐项对清楚。
@@ -36,7 +52,7 @@
 
 | 能力 | 项目如何处理 |
 | --- | --- |
-| 数据接入 | AKShare 获取 A 股指数与 ETF 日线；BaoStock 用于抽样核对 |
+| 数据接入 | 默认 AKShare 主源；可明确选择腾讯日线主源，BaoStock 交叉核对 |
 | 数据存储 | 不可变原始快照、规范 Parquet、DuckDB |
 | 数据健康 | 重复日期、OHLC 关系、空值、异常间隔、交易日陈旧度、来源失败 |
 | 基础回测 | 买入持有、双均线与时间序列动量；信号次日执行并扣除成本 |
@@ -88,6 +104,11 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli demo
 ```
 
+若通过 wheel 安装，在准备存放数据与报告的目录运行 `finance-lab init` 可创建示例
+`config/instruments.json`；已有配置不会被覆盖。随后运行 `finance-lab demo`，会在当前目录的
+`outputs/` 生成合成数据演示的 HTML、CSV、JSON 和曲线图。需要固定工作目录时设置
+`FINANCE_LAB_ROOT`；离线演示不需要行情接口。
+
 验证整个项目：
 
 ```powershell
@@ -113,7 +134,41 @@ cd a-share-quant-lab
 
 ### 更新真实数据
 
-双击 `update_data.cmd`。程序默认从 2018 年开始尝试更新示例标的。外部数据源失败时，它会记录原因并尝试备用来源，不会伪造行情。
+双击 `update_data.cmd`。程序默认从 2018 年开始尝试更新示例标的。未配置来源选择文件时，
+仍使用 AKShare 主源和 BaoStock 核对；AKShare 失败时保留原有 BaoStock 备用语义，不会伪造行情。
+
+### 明确选择腾讯主源（先在独立候选目录验证）
+
+这是人工选择，不是失败后自动切换。候选根目录的 `config/source_profile.json` 必须是
+UTF-8 JSON 普通文件，内容恰好为：
+
+```json
+{"schema_version": 1, "profile": "tencent_baostock"}
+```
+
+仅支持 `sh.000300:index` 和 `sh.510300:etf`。腾讯提供完整请求区间的主行情，
+BaoStock 是必需核对源；ETF 的 BaoStock 请求从 `max(请求起日, 2026-01-01)` 开始，
+不代表 BaoStock 验证了 2018 年以来的 ETF 全历史。指数仍核对完整请求区间。
+原始快照、整理行情和摘要分别保留来源及请求窗口，价格比较不比较成交量。
+
+例如，在已经初始化配置、与正式项目分开的候选目录中，由使用者手动创建上述文件，
+再在独立 PowerShell 会话运行（请替换示例绝对路径，不要指向当前正式目录）：
+
+```powershell
+$env:FINANCE_LAB_ROOT = 'C:\finance-candidates\tencent-check'
+finance-lab fetch --start 2018-01-01 --end 2026-10-08
+finance-lab validate
+finance-lab manifest --as-of 2026-10-08
+```
+
+这里只使用正常网络；没有代理修复或绕过方案。任何必需来源失败都会保留失败记录并非零退出；
+腾讯失败不会用 BaoStock 写入新的主行情。配置损坏、链接、权限异常或运行期间变化也会停止，
+不可删除更新标记来强行继续。来源规则、字段单位与限制详见[数据说明](docs/数据说明.md)。
+将文件改为 `{"schema_version":1,"profile":"legacy"}` 可显式选择旧来源配置，但不能解除失败批次隔离。
+
+`paper-daily` 仍按既有流程更新行情、检查健康、运行两个固定规则模拟账户并生成报告；
+来源不完整时不推进账本，不训练模型，也不保证收益。这里新增的是选择能力和隔离测试，
+没有更改真实计划任务或正式根目录；实际候选验收及任务切换需另行确认。
 
 ### 常用命令
 
@@ -122,6 +177,7 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli fetch --start 2018-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli validate
 .\.venv\Scripts\python.exe -m finance_lab.cli backtest --symbol sh.000300
+.\.venv\Scripts\python.exe -m finance_lab.cli report-verify --report outputs\sh_000300_sma_report.html
 .\.venv\Scripts\python.exe -m finance_lab.cli experiment-all --split-date 2023-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli walk-forward-all --first-oos-date 2021-01-01
 .\.venv\Scripts\python.exe -m finance_lab.cli cost-stress-all --costs 5,10,20,50
@@ -135,6 +191,113 @@ cd a-share-quant-lab
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-status
 .\.venv\Scripts\python.exe -m finance_lab.cli paper-daily
 ```
+
+查看每日运行、行情发布和模拟账本的只读汇总：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_operational_status --root . --portfolio default
+```
+
+从项目目录运行上述命令；其他项目请显式替换 `--root`，账户组按实际名称填写。
+输出为 JSON，分别列出最近有记录的运行、最后有效成功、账本最后估值、行情发布和报告生成记录。
+退出码 `0` 表示记录检查通过，`1` 表示存在失败、未知或需要注意的情况，`2` 表示请求错误。
+它不生成报告、不补建目录或锁、不更新行情或账户；原 `paper-status` 仍用于审计并重建报告。
+缺少运行归档会显示历史不可用；报告失败也可能已成功记账，不能据此重复初始化账户。
+
+这是非原子的本地观察，不能确认当前行情健康、调度器运行或报告文件完整性；
+旧字段保持未知，离线恢复保留来源提示。新运行归档保存独立 `attempt_id` 和实际事务收据；
+只读入口精确核对历史账本行，不按日期或最新行猜测归属，也不会跳过较新的坏归档。
+`automation_ledger_correlation` 区分完整匹配 `verified`、已知部分匹配 `partial_verified`、
+无新增 `no_new_commits`、明确不匹配 `mismatch`，以及未知/不可验证。
+部分匹配不代表整次成功；报告失败也可能已经记账。旧归档或缺少收据仍为 `not_available`。
+身份在最终归档才持久化，提交后到归档前被强制终止仍可能缺证，不应据此自动重跑。
+完整契约与验证边界见[运行身份计划](docs/superpowers/plans/2026-10-05-run-identity.md)
+及[验收记录](docs/superpowers/plans/2026-10-05-run-identity-acceptance.md)。
+设计与本批验收范围见[U4 设计](docs/superpowers/specs/2026-10-04-paper-operational-status-design.md)
+和[第一组三分之一交付计划](docs/superpowers/plans/2026-10-04-first-third-execution.md)。
+
+检查每日运行是否达到明确的预期交易日，并同时读取 Windows 任务快照：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_runtime_status --root C:\quant\runtime --portfolio default --expected-as-of 2026-10-15
+```
+
+请替换为实际运行根及**预期已经完成估值的交易日**。日期必填，不根据今天、周末或计划时间
+猜测休市与漏跑；例如当天尚未到计划时间时，可指定此前应完成的交易日。未来日期或非法参数退出 2。
+这个独立入口分别展示计划的下一次时间、系统最近启动与完成码、最近可校验应用归档、最后成功、
+日志中较新的启动/终态、行情未完成标记和账本最后估值日。旧成功不能盖住较新的未归档启动或失败；
+归档中派生的退出码与系统任务结果保持分开，`no-op` 不表示新增账本提交。
+
+Windows 查询仅通过随包附带的固定 PowerShell 脚本读取任务及可用的 107/110 启动事件，15 秒查询超时。
+权限不足、缺少工具、非 Windows、过期/非法快照或缺少事件证据均保留未知，不把未知说成成功。
+可以加 `--no-scheduler` 完全跳过系统查询，或用 `--task-name` 指定根路径下的其他任务名；
+这些情况仍不会证明指定任务与应用归档精确关联。下一计划时间不保证届时实际执行，
+时间触发器也可能在恢复可用后延迟执行；触发来源只按实际可读取的事件显示。
+系统的“就绪/尚未运行”等非完成状态码保留未知，不能按普通非零退出码一律报成动作失败。
+查询输出在读取时受限，stderr不留存，超限或超时仅回收本工具持有的查询进程。
+月日志按完整组合名隔离并增量选择最新记录；最新请求日期未来也会使日志证据未知。
+系统查询结束后还会重核本次已读取的应用归档、更新摘要、账本及WAL：若期间变化，
+`changed_sections` 明示受影响部分，相关成功、估值或关联结论降为未知，退出码为1。
+这一步只比较采集到的文件与目录身份，不重新打开变化后的数据库，也不自动补跑。
+已匹配更新摘要中的来源对照警告会单列为 `source_comparison_warning`，显示已记录的覆盖率和行数，
+并使诊断退出1；采集成功仍保留为 `source_outcome=success`，不会把警告改写成抓取失败。
+旧摘要缺少对照字段时保留未知，不补判全通过；此入口不重新计算对照或改变数据源规则。
+
+检查退出码为 0/1/2（`ok` / `attention` / `error`），与被查询任务的历史返回码不是同一个值。
+`attention` 包括预期日期未达到、数据隔离、有启动但缺少后续归档、运行中、系统未知或其他
+底层只读检查异常。日志和 `updating` 标记都不能确认进程仍活着或确定故障原因；
+日志终态不能替代应用归档。跨系统观察不是原子快照，不能排除 ABA 或检查结束后的变化。
+本入口不启动、补跑或修改任务，不更新行情、账本、报告或锁，不新增监控；
+也不重验当前行情健康、报告文件完整性或自然运行验收。设计与边界见
+[本批设计](docs/superpowers/specs/2026-10-16-paper-runtime-status-design.md)和
+[本地验收记录](docs/superpowers/plans/2026-10-16-paper-runtime-status-report.md)。
+
+验收一段每日模拟运行，可先捕获账本基线，再核对该区间全部新归档：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_run_acceptance capture --root C:\quant\recovered --portfolio default
+.\.venv\Scripts\python.exe -B -m finance_lab.paper_run_acceptance verify --root C:\quant\recovered --portfolio default --baseline C:\quant\evidence\before.json --attempt-id 第一次完整attempt_id --attempt-id 末次完整attempt_id
+```
+
+路径与 ID 为示例；运行前将成功 capture 的 JSON 保存到根目录外，具体保存步骤见
+[恢复验收说明](docs/恢复验收与研究会话.md#三每日模拟运行的区间验收)。工具只输出 JSON，不会执行每日运行或写证据文件。
+verify 必须按发生顺序列出基线之后的全部新尝试，不能只挑成功记录；它核对旧历史未变、
+新增账本提交与收据完整对应，并要求正常处理后同一日期的末次重复执行确实没有新增提交。
+`passed`/`attention`/`unavailable` 分别表示本工具范围通过、证据不符合验收、证据不可用；
+退出码依次为 `0`/`1`/`1`，参数或基线协议错误为 `2`。完整计划与本地验证见
+[U5 区间验收计划](docs/superpowers/plans/2026-10-06-run-acceptance.md)及
+[交付记录](docs/superpowers/plans/2026-10-06-run-acceptance-report.md)。这不验证真实进程退出码、调度器、实时健康或报告文件。
+
+多条只读研究命令若要锁定同一代行情，先运行 `manifest`，从输出中复制完整的
+64 位 `dataset_id`，记录在实验文档里，再给后续命令逐条传入相同 ID：
+
+```powershell
+.\.venv\Scripts\python.exe -m finance_lab.cli manifest
+$datasetId = "把 manifest 输出中的完整 64 位 dataset_id 粘贴在这里"
+.\.venv\Scripts\python.exe -m finance_lab.cli dataset-check --expected-dataset-id $datasetId
+.\.venv\Scripts\python.exe -m finance_lab.cli backtest --symbol sh.000300 --expected-dataset-id $datasetId
+.\.venv\Scripts\python.exe -m finance_lab.cli experiment-all --expected-dataset-id $datasetId
+```
+
+请先把字符串占位内容换成实际 ID。`dataset-check` 不生成报告，成功时返回一个 JSON，
+包含 `status=verified`、数据集 ID、健康状态、文件数和行数；健康状态为警告仍可核验，
+但不等于数据足够新或适合正式实验。若行情在两条命令之间改变，后续命令会在生成报告前
+以 `dataset_id_mismatch` 非零退出；数据无法核验或健康状态为错误时也不会生成新报告。
+单独运行 `dataset-check` 只证明检查当刻的状态，不会冻结跨命令数据；后续每条研究命令仍需传入同一 ID。
+外部程序绕过项目行情锁直接写文件时，
+仍须人工核对原始数据和报告。会更新行情的 `all` 不支持这个选项。
+
+跨平台移动旧行情前，可运行只读文件名审计：
+
+```powershell
+.\.venv\Scripts\python.exe -m finance_lab.cli filename-audit
+```
+
+它只列举 `data/curated` 中的直接子项，报告非规范 Parquet 候选名、可能在
+Windows/macOS/Linux 间混淆的大小写/Unicode/尾部点空格别名，以及伪装成 Parquet 的
+目录或符号链接。发现风险时非零退出，不自动改名、删除或读取行情内容；无风险也不代表
+数据健康或来源正确，仍需运行 `validate` 和 `manifest`。旧 `.tmp.parquet` 暂存文件
+只计数，不会被清理。
 
 ### 输出文件
 
@@ -189,7 +352,7 @@ Python 包和命令行名称仍保留为 `finance-lab` / `finance_lab`，避免�
 - 模拟盘风险门禁采用公开固定的教学阈值，只判断是否值得延长模拟观察；即使通过也不授权真实交易、不证明未来盈利。
 - 前向标的基准只表示同日期的不复权收盘价变化，不包含分红或份额调整；账户与基准的差异是百分点差，不是 alpha。
 - 逐日观察历史只从已提交估值事件重建；20/60/120/252 日里程碑衡量样本积累，不代表策略有效或可投入真实资金。
-- `paper-daily` 会依次更新数据、检查健康状态并运行模拟盘；每次成功或失败都会留下 JSON 与日志，失败返回非零退出码。Windows 计划任务只能在稳定项目目录安装，不能指向 `.worktrees`。
+- `paper-daily` 只有在行情更新明确返回完整成功且失败来源数为 0 后，才检查数据健康并推进模拟盘；失败返回非零退出码。状态写入成功时会留下 JSON 归档与 latest 状态；若状态写入本身失败，归档可能不存在，不能据此判断行情或账本未发生变化。先运行 `data-update-status`，必要时再运行 `paper-status` 审计，确认后才决定是否重试。Windows 计划任务只能在稳定项目目录安装，不能指向 `.worktrees`。
 
 ## 路线图
 

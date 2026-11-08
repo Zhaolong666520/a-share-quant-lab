@@ -12,8 +12,10 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle
 
+from finance_lab.atomic_io import write_file_atomic, write_text_atomic
 from finance_lab.config import ProjectPaths
 from finance_lab.parameter_sensitivity import ParameterScenario, ParameterSensitivityResult
+from finance_lab.report_bundle import publish_report_bundle
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -134,8 +136,12 @@ def _write_heatmap(result: ParameterSensitivityResult, chart_path: Path) -> None
     colorbar = figure.colorbar(image, ax=axis)
     colorbar.set_label("Walk-forward aggregate total return")
     figure.tight_layout()
-    figure.savefig(chart_path, dpi=150)
-    plt.close(figure)
+    try:
+        write_file_atomic(
+            chart_path, lambda temporary: figure.savefig(temporary, dpi=150, format="png")
+        )
+    finally:
+        plt.close(figure)
 
 
 def write_parameter_sensitivity_report(
@@ -149,7 +155,12 @@ def write_parameter_sensitivity_report(
     csv_path = paths.outputs / f"{stem}_scenarios.csv"
 
     scenario_rows = [_scenario_row(scenario) for scenario in result.scenarios]
-    pd.DataFrame(scenario_rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    write_file_atomic(
+        csv_path,
+        lambda temporary: pd.DataFrame(scenario_rows).to_csv(
+            temporary, index=False, encoding="utf-8-sig"
+        ),
+    )
     _write_heatmap(result, chart_path)
 
     reference = result.reference_scenario
@@ -205,7 +216,7 @@ def write_parameter_sensitivity_report(
 </body>
 </html>
 """
-    html_path.write_text(document, encoding="utf-8")
+    write_text_atomic(html_path, document)
     payload = {
         "settings": result.settings_dict(),
         "total_scenarios": result.total_scenarios,
@@ -221,8 +232,6 @@ def write_parameter_sensitivity_report(
             "Historical results are not investment advice.",
         ],
     }
-    json_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
+    write_text_atomic(json_path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+    publish_report_bundle(html_path, (html_path, chart_path, json_path, csv_path))
     return html_path, chart_path, json_path, csv_path

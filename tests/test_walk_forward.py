@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from finance_lab.config import get_paths
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.walk_forward import check_execution_consistency, run_walk_forward
 from finance_lab.walk_forward_report import write_walk_forward_report
@@ -151,6 +152,7 @@ def test_walk_forward_report_creates_html_json_chart_and_csv(tmp_path: Path) -> 
     outputs = write_walk_forward_report(result, get_paths(tmp_path))
 
     assert all(path.exists() for path in outputs)
+    assert verify_report_bundle(outputs[0])["files_checked"] == len(outputs)
     report_text = outputs[0].read_text(encoding="utf-8")
     assert "滚动检验" in report_text
     assert f"共 {len(result.folds)} 个窗口" in report_text

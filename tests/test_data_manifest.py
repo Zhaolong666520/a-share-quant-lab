@@ -16,6 +16,7 @@ from finance_lab.data_manifest import (
     write_dataset_manifest_report,
 )
 from finance_lab.pipeline import data_health
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
 
@@ -94,6 +95,33 @@ def test_manifest_rejects_future_data_relative_to_as_of_date(tmp_path: Path) -> 
 
     assert "data_after_as_of" in manifest.files[0].error_codes
     assert manifest.health_status == "error"
+
+
+def test_manifest_marks_intraday_daily_bar_as_error(tmp_path: Path) -> None:
+    paths = get_paths(tmp_path)
+    prices = make_synthetic_daily_prices(periods=140)
+    prices["trade_date"] = prices["trade_date"].dt.strftime("%Y-%m-%d")
+    prices.loc[5, "trade_date"] = "2022-01-11T13:30:00"
+    prices.to_parquet(paths.curated / "demo_000300.parquet", index=False)
+
+    manifest = generate_dataset_manifest(paths, as_of_date=date(2022, 8, 1))
+
+    assert manifest.health_status == "error"
+    assert "non_daily_date" in manifest.files[0].error_codes
+
+
+def test_manifest_rejects_numeric_trade_dates(tmp_path: Path) -> None:
+    paths = get_paths(tmp_path)
+    prices = make_synthetic_daily_prices(periods=140)
+    prices["trade_date"] = 0
+    prices.to_parquet(paths.curated / "demo_000300.parquet", index=False)
+
+    manifest = generate_dataset_manifest(paths, as_of_date=date(2022, 8, 1))
+
+    assert manifest.health_status == "error"
+    assert "invalid_date" in manifest.files[0].error_codes
+    assert manifest.files[0].start_date is None
+    assert manifest.files[0].end_date is None
 
 
 def test_manifest_surfaces_latest_upstream_source_errors(tmp_path: Path) -> None:
@@ -312,6 +340,7 @@ def test_manifest_report_writes_json_and_html(tmp_path: Path) -> None:
     assert "数据集健康报告" in text
     assert "不复权" in text
     assert manifest.dataset_id in text
+    assert verify_report_bundle(html_path)["status"] == "verified"
 
 
 def test_manifest_report_paths_distinguish_freshness_context(tmp_path: Path) -> None:

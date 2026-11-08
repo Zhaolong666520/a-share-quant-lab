@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, date, datetime
+from importlib.metadata import version as package_version
 
+import numpy as np
 import pandas as pd
 
 from finance_lab.config import Instrument
@@ -25,6 +28,23 @@ CANONICAL_COLUMNS = [
 class DataSourceError(RuntimeError):
     """Raised when an upstream market data source cannot provide usable data."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str = "unknown",
+        received_rows: int = 0,
+        accepted_rows: int = 0,
+        rejected_rows: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.received_rows = received_rows
+        self.accepted_rows = accepted_rows
+        self.rejected_rows = (
+            received_rows - accepted_rows if rejected_rows is None else rejected_rows
+        )
+
 
 def _date_compact(value: date) -> str:
     return value.strftime("%Y%m%d")
@@ -38,9 +58,75 @@ def _ingested_at() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
-def _numeric(frame: pd.DataFrame, columns: list[str]) -> None:
-    for column in columns:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+_NUMERIC = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _invalid(message: str, received: int) -> DataSourceError:
+    return DataSourceError(
+        message, stage="validation", received_rows=received, rejected_rows=received
+    )
+
+
+def _normalize(
+    raw: pd.DataFrame,
+    instrument: Instrument,
+    start: date,
+    end: date,
+    *,
+    source: str,
+    volume_unit: str,
+    date_field: str,
+    fields: dict[str, str],
+    rejected_nontrading: int = 0,
+    received_rows: int | None = None,
+) -> pd.DataFrame:
+    received = len(raw) if received_rows is None else received_rows
+    required = {date_field, *fields}
+    if not required.issubset(raw.columns):
+        raise DataSourceError(
+            f"{source} 响应缺少必要字段",
+            stage="response",
+            received_rows=received,
+            rejected_rows=received,
+        )
+    if raw.empty:
+        raise DataSourceError(
+            f"{source} 未返回有效交易行",
+            stage="response",
+            received_rows=received,
+            rejected_rows=received,
+        )
+    frame = raw.rename(columns={date_field: "trade_date", **fields})[
+        ["trade_date", *_NUMERIC]
+    ].copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    if frame["trade_date"].isna().any():
+        raise _invalid(f"{source} 含无效交易日期", received)
+    if frame["trade_date"].ne(frame["trade_date"].dt.normalize()).any():
+        raise _invalid(f"{source} 日线日期包含非零时间", received)
+    if frame["trade_date"].dt.date.lt(start).any() or frame["trade_date"].dt.date.gt(end).any():
+        raise _invalid(f"{source} 含请求范围外日期", received)
+    if frame["trade_date"].duplicated().any():
+        raise _invalid(f"{source} 含重复交易日期", received)
+    for name in _NUMERIC:
+        frame[name] = pd.to_numeric(frame[name], errors="coerce")
+        if frame[name].isna().any() or not np.isfinite(
+            frame[name].to_numpy(dtype=float)
+        ).all():
+            raise _invalid(f"{source} 含无效 {name} 数值", received)
+    frame["symbol"] = instrument.symbol
+    frame["volume_unit"] = volume_unit
+    frame["adjustment"] = "none"
+    frame["source"] = source
+    frame["ingested_at"] = _ingested_at()
+    frame = frame[CANONICAL_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+    frame.attrs["source_diagnostics"] = {
+        "received_rows": received,
+        "accepted_rows": len(frame),
+        "rejected_rows": rejected_nontrading,
+        "rejection_reasons": {"nontrading": rejected_nontrading} if rejected_nontrading else {},
+    }
+    return frame
 
 
 def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFrame:
@@ -49,9 +135,8 @@ def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFram
         import akshare as ak
 
         if instrument.kind == "index":
-            raw = ak.index_zh_a_hist(
-                symbol=instrument.code,
-                period="daily",
+            raw = ak.stock_zh_index_daily_em(
+                symbol=instrument.exchange + instrument.code,
                 start_date=_date_compact(start),
                 end_date=_date_compact(end),
             )
@@ -64,84 +149,141 @@ def fetch_akshare(instrument: Instrument, start: date, end: date) -> pd.DataFram
                 adjust="",
             )
         else:
-            raise DataSourceError(f"AKShare 暂不支持标的类型: {instrument.kind}")
+            raise DataSourceError("AKShare 不支持标的类型", stage="request")
     except DataSourceError:
         raise
     except Exception as exc:
-        raise DataSourceError(f"AKShare 请求失败: {exc}") from exc
+        raise DataSourceError("AKShare 请求失败", stage="request") from exc
 
-    if raw is None or raw.empty:
-        raise DataSourceError(f"AKShare 未返回 {instrument.name} 的数据")
+    if raw is None or not isinstance(raw, pd.DataFrame):
+        raise DataSourceError("AKShare 响应不是表格", stage="response", received_rows=0)
+    return _normalize(
+        raw, instrument, start, end, source="akshare", volume_unit="lot",
+        date_field="date" if instrument.kind == "index" else "日期",
+        fields={name: name for name in _NUMERIC} if instrument.kind == "index" else {
+            "开盘": "open", "最高": "high", "最低": "low", "收盘": "close",
+            "成交量": "volume", "成交额": "amount",
+        },
+    )
 
-    required = {"日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"}
-    missing = required.difference(raw.columns)
-    if missing:
-        raise DataSourceError(f"AKShare 字段发生变化，缺少: {sorted(missing)}")
+_BAOSTOCK_VERSION = "0.9.3"
+_BAOSTOCK_PAGE_SIZE = 2000
 
-    frame = raw.rename(
-        columns={
-            "日期": "trade_date",
-            "开盘": "open",
-            "最高": "high",
-            "最低": "low",
-            "收盘": "close",
-            "成交量": "volume",
-            "成交额": "amount",
-        }
-    )[["trade_date", "open", "high", "low", "close", "volume", "amount"]].copy()
-    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-    _numeric(frame, ["open", "high", "low", "close", "volume", "amount"])
-    frame["symbol"] = instrument.symbol
-    frame["volume_unit"] = "lot"
-    frame["adjustment"] = "none"
-    frame["source"] = "akshare"
-    frame["ingested_at"] = _ingested_at()
-    frame = frame.dropna(subset=["trade_date", "open", "high", "low", "close"])
-    return frame[CANONICAL_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+
+def _baostock_page_number(value: object) -> int | None:
+    if type(value) is int:
+        return value if 0 < value <= 2**31 - 1 else None
+    if (isinstance(value, str) and value.isascii() and value.isdigit()
+            and len(value) <= 10):
+        number = int(value)
+        return number if 0 < number <= 2**31 - 1 else None
+    return None
+
+
+def _assert_baostock_complete(result: object, received: int) -> None:
+    """Reject ambiguous termination using the verified SDK 0.9.3 page semantics."""
+    if getattr(result, "error_code", None) != "0":
+        raise DataSourceError(
+            "BaoStock 迭代结束时返回错误 (iteration_error_code)",
+            stage="iteration", received_rows=received,
+        )
+    data = getattr(result, "data", None)
+    cursor = getattr(result, "cur_row_num", None)
+    page = _baostock_page_number(getattr(result, "cur_page_num", None))
+    page_size = _baostock_page_number(getattr(result, "per_page_count", None))
+    page_rows = len(data) if isinstance(data, list) else None
+    valid = (
+        page_rows is not None and type(cursor) is int and cursor == page_rows
+        and page is not None and page_size == _BAOSTOCK_PAGE_SIZE
+        and received == (page - 1) * _BAOSTOCK_PAGE_SIZE + page_rows
+    )
+    if not valid or page_rows == _BAOSTOCK_PAGE_SIZE:
+        reason = "pagination_state_invalid" if not valid else "pagination_completion_unknown"
+        safe_cursor = cursor if type(cursor) is int and 0 <= cursor <= received else None
+        raise DataSourceError(
+            f"BaoStock 分页完成未确认 ({reason}; page_rows={page_rows}, "
+            f"cursor={safe_cursor}, page={page}, page_size={page_size})",
+            stage="iteration", received_rows=received,
+        )
+    # An exhausted full page can mean a swallowed receive failure. An explicit
+    # empty/short tail or a >2000-row packet is terminal in SDK 0.9.3; the latter
+    # is explicitly supported by ResultData.next(). Normal row checks still run.
+
 
 def fetch_baostock(instrument: Instrument, start: date, end: date) -> pd.DataFrame:
     """Fetch unadjusted daily bars from BaoStock as an independent check source."""
     try:
+        sdk_version = package_version("baostock")
+    except Exception as exc:
+        raise DataSourceError("BaoStock 版本无法确认", stage="import") from exc
+    if sdk_version != _BAOSTOCK_VERSION:
+        raise DataSourceError(
+            "BaoStock 版本未验证 (unsupported_sdk_version)", stage="import",
+        )
+    try:
         import baostock as bs
-
+    except Exception as exc:
+        raise DataSourceError("BaoStock 不可用", stage="import") from exc
+    try:
         login = bs.login()
+    except Exception as exc:
+        raise DataSourceError("BaoStock 登录调用失败", stage="login") from exc
+    try:
         if login.error_code != "0":
-            raise DataSourceError(f"BaoStock 登录失败: {login.error_msg}")
+            raise DataSourceError("BaoStock 登录失败", stage="login")
         try:
             fields = "date,code,open,high,low,close,volume,amount,tradestatus"
-            result = bs.query_history_k_data_plus(
-                instrument.baostock_code,
-                fields,
-                start_date=_date_iso(start),
-                end_date=_date_iso(end),
-                frequency="d",
-                adjustflag="3",
-            )
+            try:
+                result = bs.query_history_k_data_plus(
+                    instrument.baostock_code,
+                    fields,
+                    start_date=_date_iso(start),
+                    end_date=_date_iso(end),
+                    frequency="d",
+                    adjustflag="3",
+                )
+            except Exception as exc:
+                raise DataSourceError("BaoStock 查询调用失败", stage="query") from exc
             if result.error_code != "0":
-                raise DataSourceError(f"BaoStock 请求失败: {result.error_msg}")
+                raise DataSourceError("BaoStock 请求失败", stage="query")
             rows: list[list[str]] = []
-            while result.next():
-                rows.append(result.get_row_data())
+            try:
+                while result.next():
+                    rows.append(result.get_row_data())
+            except Exception as exc:
+                raise DataSourceError(
+                    "BaoStock 结果迭代失败", stage="iteration", received_rows=len(rows)
+                ) from exc
+            _assert_baostock_complete(result, len(rows))
             raw = pd.DataFrame(rows, columns=result.fields)
         finally:
-            bs.logout()
+            primary_failed = sys.exc_info()[0] is not None
+            try:
+                bs.logout()
+            except Exception as exc:
+                if not primary_failed:
+                    raise DataSourceError("BaoStock 退出失败", stage="logout") from exc
     except DataSourceError:
         raise
     except Exception as exc:
-        raise DataSourceError(f"BaoStock 请求失败: {exc}") from exc
+        raise DataSourceError("BaoStock 请求失败", stage="request") from exc
 
+    received = len(raw)
     if raw.empty:
-        raise DataSourceError(f"BaoStock 未返回 {instrument.name} 的数据")
-
-    frame = raw.rename(columns={"date": "trade_date"}).copy()
-    if "tradestatus" in frame.columns:
-        frame = frame[frame["tradestatus"].isin(["", "1"])]
-    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-    _numeric(frame, ["open", "high", "low", "close", "volume", "amount"])
-    frame["symbol"] = instrument.symbol
-    frame["volume_unit"] = "share"
-    frame["adjustment"] = "none"
-    frame["source"] = "baostock"
-    frame["ingested_at"] = _ingested_at()
-    frame = frame.dropna(subset=["trade_date", "open", "high", "low", "close"])
-    return frame[CANONICAL_COLUMNS].sort_values("trade_date").reset_index(drop=True)
+        raise DataSourceError("BaoStock 未返回交易行", stage="response")
+    required = {"date", "code", *_NUMERIC, "tradestatus"}
+    if not required.issubset(raw.columns):
+        raise DataSourceError(
+            "BaoStock 响应缺少必要字段", stage="response",
+            received_rows=received, rejected_rows=received,
+        )
+    if set(raw["code"].astype(str)) != {instrument.symbol}:
+        raise _invalid("BaoStock 返回了非目标标的", received)
+    if not raw["tradestatus"].isin(["", "0", "1"]).all():
+        raise _invalid("BaoStock 含未知交易状态", received)
+    trading = raw[raw["tradestatus"].isin(["", "1"])]
+    return _normalize(
+        trading, instrument, start, end, source="baostock", volume_unit="share",
+        date_field="date", fields={name: name for name in _NUMERIC},
+        rejected_nontrading=received - len(trading), received_rows=received,
+    )

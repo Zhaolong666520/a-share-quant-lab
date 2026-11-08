@@ -18,7 +18,7 @@ from finance_lab.paper_models import (
     PaperState,
     make_default_accounts,
 )
-from finance_lab.paper_store import PaperAuditError, PaperStore
+from finance_lab.paper_store import PaperAuditError, PaperStore, PaperStoreError
 from finance_lab.share_adjustments import ShareAdjustment
 
 
@@ -112,6 +112,126 @@ def test_schema_migrates_v1_state_without_losing_cached_values(tmp_path: Path) -
 
     assert migrated == (1000.0, "legacy-hash", "[]")
     assert versions == [(1,), (2,)]
+
+
+def test_schema_repairs_partially_applied_v2_migration(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "CREATE TABLE paper_schema_metadata ("
+            "schema_version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute("INSERT INTO paper_schema_metadata VALUES (1, CURRENT_TIMESTAMP)")
+        connection.execute(
+            """
+            CREATE TABLE paper_state (
+                account_id VARCHAR PRIMARY KEY,
+                last_trade_date DATE NOT NULL,
+                cash DOUBLE NOT NULL,
+                shares BIGINT NOT NULL,
+                last_close DOUBLE NOT NULL,
+                equity DOUBLE NOT NULL,
+                equity_peak DOUBLE NOT NULL,
+                drawdown DOUBLE NOT NULL,
+                last_target_position INTEGER,
+                pending_order_json VARCHAR,
+                distribution_entitlements_json VARCHAR,
+                last_event_hash VARCHAR NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO paper_state VALUES (
+                'partial-account', DATE '2026-01-02', 1000.0, 0, 10.0,
+                1000.0, 1000.0, 0.0, NULL, NULL, NULL,
+                'partial-hash', CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    with PaperStore(database) as store:
+        store.ensure_schema()
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        value = connection.execute(
+            "SELECT distribution_entitlements_json FROM paper_state"
+        ).fetchone()
+        nullable = connection.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'paper_state' "
+            "AND column_name = 'distribution_entitlements_json'"
+        ).fetchone()
+        version = connection.execute(
+            "SELECT MAX(schema_version) FROM paper_schema_metadata"
+        ).fetchone()
+
+    assert value == ("[]",)
+    assert nullable == ("NO",)
+    assert version == (2,)
+
+
+def test_schema_rejects_database_from_future_version_without_mutating_it(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "CREATE TABLE paper_schema_metadata ("
+            "schema_version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute("INSERT INTO paper_schema_metadata VALUES (99, CURRENT_TIMESTAMP)")
+
+    with PaperStore(database) as store:
+        with pytest.raises(PaperStoreError, match="未来版本"):
+            store.ensure_schema()
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        tables = connection.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' ORDER BY table_name"
+        ).fetchall()
+        versions = connection.execute(
+            "SELECT schema_version FROM paper_schema_metadata"
+        ).fetchall()
+
+    assert tables == [("paper_schema_metadata",)]
+    assert versions == [(99,)]
+
+
+def test_schema_creation_rolls_back_if_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+
+    with PaperStore(database) as store:
+        monkeypatch.setattr(
+            store,
+            "_validate_schema",
+            lambda: (_ for _ in ()).throw(PaperStoreError("simulated validation failure")),
+            raising=False,
+        )
+        with pytest.raises(PaperStoreError, match="simulated"):
+            store.ensure_schema()
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        tables = connection.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+
+    assert tables == []
+
+
+def test_schema_rejects_incomplete_existing_table(tmp_path: Path) -> None:
+    database = tmp_path / "finance_lab.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute("CREATE TABLE paper_state (account_id VARCHAR PRIMARY KEY)")
+
+    with PaperStore(database) as store:
+        with pytest.raises(PaperStoreError, match="表结构"):
+            store.ensure_schema()
 
 
 def _history(periods: int) -> pd.DataFrame:

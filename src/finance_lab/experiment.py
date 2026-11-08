@@ -96,12 +96,14 @@ def _extract_trades(frame: pd.DataFrame) -> pd.DataFrame:
         trade_mask,
         [
             "trade_date",
+            "return_end_date",
             "signal_date",
             "open",
             "position",
             "turnover",
             "cost",
             "decision_signal",
+            "experiment_period",
         ],
     ].copy()
     trades["position_change"] = position_change.loc[trade_mask]
@@ -116,6 +118,7 @@ def _extract_trades(frame: pd.DataFrame) -> pd.DataFrame:
     )
     columns = [
         "trade_date",
+        "return_end_date",
         "action",
         "execution_open",
         "position_before",
@@ -125,6 +128,7 @@ def _extract_trades(frame: pd.DataFrame) -> pd.DataFrame:
         "estimated_cost_fraction",
         "signal_date",
         "decision_signal",
+        "experiment_period",
     ]
     return trades[columns].reset_index(drop=True)
 
@@ -200,11 +204,6 @@ def run_split_experiment(
     )
     full_result.frame["experiment_period"] = frame["experiment_period"]
     trades = _extract_trades(frame)
-    trades["experiment_period"] = np.where(
-        trades["trade_date"] < split_timestamp,
-        "development",
-        "out_of_sample",
-    )
     fingerprint = data_fingerprint(prices)
     return SplitExperimentResult(
         experiment_id=_experiment_id(

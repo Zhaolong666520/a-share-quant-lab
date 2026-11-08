@@ -17,6 +17,7 @@ from finance_lab.execution_feasibility import (
     simulate_execution,
 )
 from finance_lab.execution_feasibility_report import write_execution_feasibility_report
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 
 
@@ -256,6 +257,7 @@ def test_execution_report_creates_html_json_chart_and_events_csv(tmp_path: Path)
     outputs = write_execution_feasibility_report(result, get_paths(tmp_path))
 
     assert all(path.exists() and path.stat().st_size > 0 for path in outputs)
+    assert verify_report_bundle(outputs[0])["files_checked"] == len(outputs)
     report_text = outputs[0].read_text(encoding="utf-8")
     assert "执行可行性压力测试" in report_text
     assert "不是当前涨跌停规则" in report_text

@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
     }
 }
 
-& $VenvPython -m pip install pip==26.2.1 setuptools==80.9.0 wheel==0.45.1
+& $VenvPython -m pip install pip==26.2.1 setuptools==83.0.0 wheel==0.46.2
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to install the pinned Python build toolchain"
 }

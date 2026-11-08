@@ -4,24 +4,41 @@ import re
 import sys
 from pathlib import Path
 
-MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]+\]\(([^)]+)\)")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DOCUMENTS = (
-    "README.md",
-    "CONTRIBUTING.md",
-    "docs/快速开始.md",
-    "docs/quickstart.en.md",
-)
+
+
+def _repository_documents() -> list[Path]:
+    ignored = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        ".worktrees",
+        "build",
+        "dist",
+        "smoke-venv",
+    }
+    return sorted(
+        document
+        for document in PROJECT_ROOT.rglob("*.md")
+        if not any(
+            part in ignored or part.startswith(("package_staging_", "package_verify_"))
+            for part in document.relative_to(PROJECT_ROOT).parts
+        )
+    )
 
 
 def main(arguments: list[str]) -> int:
     using_defaults = not arguments
     if using_defaults:
-        arguments = [str(PROJECT_ROOT / document) for document in DEFAULT_DOCUMENTS]
+        documents = _repository_documents()
+    else:
+        documents = [Path(argument) for argument in arguments]
 
     broken: list[tuple[Path, str]] = []
-    for argument in arguments:
-        document = Path(argument)
+    for document in documents:
         content = document.read_text(encoding="utf-8")
         for match in MARKDOWN_LINK.finditer(content):
             target = match.group(1).strip()
@@ -30,14 +47,21 @@ def main(arguments: list[str]) -> int:
                 ("http://", "https://", "mailto:")
             ):
                 continue
-            local_path = target.split("#", maxsplit=1)[0]
+            local_path = target.split("#", maxsplit=1)[0].split(maxsplit=1)[0]
+            local_path = local_path.strip("<>")
             if not (document.parent / local_path).exists():
                 broken.append((document, target))
 
     for document, target in broken:
         print(f"{document}: broken local Markdown link: {target}")
     if using_defaults and not broken:
-        print(f"Checked {len(DEFAULT_DOCUMENTS)} Markdown files: {', '.join(DEFAULT_DOCUMENTS)}")
+        relative_documents = [
+            document.relative_to(PROJECT_ROOT).as_posix() for document in documents
+        ]
+        print(
+            f"Checked {len(documents)} Markdown files: "
+            + ", ".join(relative_documents)
+        )
     return 1 if broken else 0
 
 

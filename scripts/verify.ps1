@@ -15,12 +15,20 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "mypy failed"
 }
-& $Python -m pytest
+& $Python -m pytest --cov=finance_lab --cov-branch --cov-report=term-missing --cov-fail-under=80
 if ($LASTEXITCODE -ne 0) {
     throw "pytest failed"
 }
 & $Python -m compileall -q src tests
 if ($LASTEXITCODE -ne 0) {
     throw "compileall failed"
+}
+& $Python scripts/check_markdown_links.py
+if ($LASTEXITCODE -ne 0) {
+    throw "Markdown link check failed"
+}
+& $Python -m pip check
+if ($LASTEXITCODE -ne 0) {
+    throw "pip check failed"
 }
 Write-Host "All local verification checks passed." -ForegroundColor Green

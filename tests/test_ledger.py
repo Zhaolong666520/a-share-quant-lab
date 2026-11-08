@@ -19,6 +19,7 @@ from finance_lab.ledger import (
 )
 from finance_lab.ledger_report import write_account_ledger_report
 from finance_lab.pipeline import account_backtest_symbol
+from finance_lab.report_bundle import verify_report_bundle
 from finance_lab.sample import make_synthetic_daily_prices
 from finance_lab.storage import save_curated
 
@@ -246,6 +247,8 @@ def test_ledger_report_writes_html_json_and_trades_csv(tmp_path: Path) -> None:
         result,
         get_paths(tmp_path),
     )
+
+    assert verify_report_bundle(html_path)["files_checked"] == 5
 
     assert all(path.exists() and path.stat().st_size > 0 for path in [
         html_path,

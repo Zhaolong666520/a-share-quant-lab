@@ -1,6 +1,5 @@
 param(
-    [ValidatePattern("^v[0-9]+(?:\.[0-9]+){0,2}$")]
-    [string]$Version = "v0.9.1"
+    [string]$Version
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,16 +7,26 @@ $env:PYTHONUTF8 = "1"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$ProjectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $ProjectPython)) {
+    throw "Run scripts\setup.ps1 before packaging"
+}
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $PackageVersion = & $ProjectPython -c "from finance_lab import __version__; print(__version__)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to read the package version"
+    }
+    $Version = "v$PackageVersion"
+}
+if ($Version -notmatch "^v[0-9]+(?:\.[0-9]+){0,2}$") {
+    throw "Version must look like v1.0.0"
+}
 $DeliverablesRoot = (Resolve-Path (Join-Path $ProjectRoot "outputs")).Path
 $StageLeaf = "package_staging_$Version"
 $VerifyLeaf = "package_verify_$Version"
 $StagePath = Join-Path $ProjectRoot $StageLeaf
 $VerifyPath = Join-Path $ProjectRoot $VerifyLeaf
 $ArchivePath = Join-Path $DeliverablesRoot "a-share-quant-lab-source-$Version.zip"
-$ProjectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $ProjectPython)) {
-    throw "Run scripts\setup.ps1 before packaging"
-}
 
 function Assert-SafeTemporaryPath {
     param(
@@ -129,6 +138,9 @@ $RequiredArchivePaths = @(
     "src\finance_lab\paper_models.py",
     "src\finance_lab\paper_attribution.py",
     "src\finance_lab\paper_automation.py",
+    "src\finance_lab\paper_process_evidence.py",
+    "src\finance_lab\paper_process_status.py",
+    "src\finance_lab\paper_process_worker.py",
     "src\finance_lab\paper_benchmark.py",
     "src\finance_lab\paper_observation.py",
     "src\finance_lab\paper_risk.py",
@@ -151,6 +163,8 @@ $RequiredArchivePaths = @(
     "tests\test_paper_models.py",
     "tests\test_paper_attribution.py",
     "tests\test_paper_automation.py",
+    "tests\test_paper_process_evidence.py",
+    "tests\test_paper_process_launcher.py",
     "tests\test_paper_benchmark.py",
     "tests\test_paper_observation.py",
     "tests\test_paper_risk.py",
