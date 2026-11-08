@@ -13,6 +13,8 @@ import traceback
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -50,7 +52,7 @@ def main() -> int:
         scratch = Path(tempfile.mkdtemp(prefix="synthetic-database-", dir=scratch_base))
         attempted = True
         run_case(scratch, "database", termination_mode="terminate_process")
-    except Exception as exc:
+    except (Exception, pytest.fail.Exception) as exc:
         error = {"type": type(exc).__name__, "message": str(exc),
                  "traceback": traceback.format_exc()}
     finally:
@@ -60,12 +62,12 @@ def main() -> int:
             os.environ["FINANCE_LAB_PROCESS_DIAGNOSTICS"] = previous
     elapsed = time.monotonic() - started
     result = {**identity, "attempted": attempted, "status": "failed" if error else "passed",
+              "test_status": "failed" if error else "passed",
               "elapsed_seconds": elapsed, "error": error,
               "interpretation": (
                   "This control does not replace the os._exit tests, prove the old crash fixed, "
                   "or identify its native root cause."
               )}
-    (batch / "runner-result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     suite = ET.Element("testsuite", name="process-exit-control", tests="1", skipped="0",
                        failures="1" if error else "0", errors="0", time=str(elapsed))
     case = ET.SubElement(suite, "testcase", classname="process_exit_control",
@@ -74,9 +76,24 @@ def main() -> int:
         ET.SubElement(case, "failure", type=error["type"], message=error["message"]).text = (
             error["traceback"]
         )
-    ET.ElementTree(suite).write(batch / "control-tests.xml", encoding="utf-8", xml_declaration=True)
-    print(json.dumps({"status": result["status"], "evidence": str(batch), "error": error}))
-    return 1 if error else 0
+    collector_errors = []
+    try:
+        ET.ElementTree(suite).write(
+            batch / "control-tests.xml", encoding="utf-8", xml_declaration=True
+        )
+    except Exception as exc:
+        collector_errors.append({"step": "junit_write", "type": type(exc).__name__,
+                                 "error": str(exc)})
+    result["collector_errors"] = collector_errors
+    result["status"] = "failed" if error or collector_errors else "passed"
+    try:
+        (batch / "runner-result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    except Exception as exc:
+        collector_errors.append({"step": "result_write", "type": type(exc).__name__,
+                                 "error": str(exc)})
+        result["status"] = "failed"
+    print(json.dumps({**result, "evidence": str(batch)}), flush=True)
+    return 1 if error or collector_errors else 0
 
 
 if __name__ == "__main__":

@@ -99,6 +99,8 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
 
+  # One diagnostic candidate only: remove this job before the fixture/link candidate push.
+  # Retain its script and artifacts; do not automatically repeat these two control cells.
   process-exit-control:
     name: Process exit control (${{ matrix.python-version }})
     runs-on: windows-latest
