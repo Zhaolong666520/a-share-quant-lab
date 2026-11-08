@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKER = PROJECT_ROOT / "scripts" / "check_markdown_links.py"
 
@@ -109,3 +111,39 @@ def test_release_package_requires_checker_and_its_tests() -> None:
 
     assert '"scripts\\check_markdown_links.py"' in package_script
     assert '"tests\\test_markdown_links.py"' in package_script
+
+
+@pytest.mark.parametrize("filename", ["项目总纲.md", "项目当前状态.md", "项目决定记录.md"])
+def test_governance_local_paths_keep_repository_links_strict(tmp_path: Path, filename: str) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / filename
+    guide.write_text(
+        "本机封存材料，不随仓库分发：`../.planning/absent/report.md#evidence`，"
+        "`D:/FinanceLab/handoff/absent/report.md`。\n"
+        "[Repository document](repository.md#details)\n",
+        encoding="utf-8",
+    )
+
+    missing = _run_checker(guide)
+    assert missing.returncode == 1
+    assert str(guide) in missing.stdout
+    assert "repository.md#details" in missing.stdout
+    assert "absent/report.md" not in missing.stdout
+
+    (docs / "repository.md").write_text("# Details\n", encoding="utf-8")
+    complete = _run_checker(guide)
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+
+
+def test_checker_does_not_exempt_missing_planning_markdown_links(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    guide = docs / "guide.md"
+    guide.write_text("[Evidence](../.planning/missing.md)\n", encoding="utf-8")
+
+    result = _run_checker(guide)
+
+    assert result.returncode == 1
+    assert str(guide) in result.stdout
+    assert "../.planning/missing.md" in result.stdout

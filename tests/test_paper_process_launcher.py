@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -69,10 +69,7 @@ def _fixture(tmp_path: Path, mode: str):
     script = script.replace("Show-PaperFailureNotification $message", "$null = $message")
     runner = scripts / "run_paper_daily.ps1"
     runner.write_text(script, encoding="utf-8")
-    binary = project / ".venv/Scripts/python.exe"
-    binary.parent.mkdir(parents=True)
-    shutil.copyfile(sys.executable, binary)
-    shutil.copyfile(Path(sys.prefix) / "pyvenv.cfg", project / ".venv/pyvenv.cfg")
+    venv.EnvBuilder(with_pip=False, symlinks=False).create(project / ".venv")
     package = project / "fixture-src/finance_lab"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(

@@ -99,40 +99,6 @@ jobs:
       - name: Compile
         run: python -m compileall -q src tests
 
-  # One diagnostic candidate only: remove this job before the fixture/link candidate push.
-  # Retain its script and artifacts; do not automatically repeat these two control cells.
-  process-exit-control:
-    name: Process exit control (${{ matrix.python-version }})
-    runs-on: windows-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-      - name: Install project
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip==26.2.1 setuptools==83.0.0 wheel==0.46.2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install -r requirements-lock.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --no-build-isolation --no-deps -e .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: One database TerminateProcess control
-        run: python -m tests.process_exit_control --output "${{ runner.temp }}/finance-lab-exit-control"
-      - name: Preserve exit control evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: process-exit-control-${{ matrix.python-version }}
-          path: ${{ runner.temp }}/finance-lab-exit-control
-
   dependency-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
